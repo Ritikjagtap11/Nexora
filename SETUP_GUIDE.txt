@@ -1,0 +1,553 @@
+================================================================================
+                    NEXORA — COMPLETE SETUP GUIDE
+          AI-Powered Intelligent Document Retrieval System
+================================================================================
+
+This guide walks you through setting up NEXORA from absolute scratch
+on a brand-new machine. Follow every step in order.
+
+
+================================================================================
+SECTION 1 — PREREQUISITES
+================================================================================
+
+Install the following tools before proceeding:
+
+  TOOL              MINIMUM VERSION    DOWNLOAD
+  ─────────────────────────────────────────────────────────────────
+  Python            3.11 or higher     https://www.python.org/downloads/
+  Node.js           18.0 or higher     https://nodejs.org/ (LTS recommended)
+  npm               9.0 or higher      (Bundled with Node.js)
+  Git               2.30 or higher     https://git-scm.com/downloads
+
+  IMPORTANT (Python installation on Windows):
+    ✅ Check "Add Python to PATH" during installation
+    ✅ Check "Install pip"
+
+  OS Compatibility:
+    ✅ Windows 10/11 (64-bit) — Primary development platform
+    ✅ macOS 12+ (Intel/Apple Silicon)
+    ✅ Linux (Ubuntu 20.04+, Debian 11+)
+
+  Hardware Requirements:
+    - RAM: 8GB minimum (16GB recommended — PyTorch + FAISS are memory-heavy)
+    - Storage: 5GB free space (for dependencies + ML models)
+    - Internet: Required for Gemini API, Firebase, Cloudinary, Google Drive
+
+
+================================================================================
+SECTION 2 — CLONE & INSTALL
+================================================================================
+
+  Step 1: Clone the repository
+  ────────────────────────────
+    git clone <repo-url>
+    cd NEXORA
+
+  Step 2: Backend setup
+  ─────────────────────
+    cd backend
+
+    # Create Python virtual environment
+    python -m venv venv
+
+    # Activate the virtual environment
+    # Windows PowerShell:
+      venv\Scripts\Activate.ps1
+    # Windows CMD:
+      venv\Scripts\activate.bat
+    # macOS/Linux:
+      source venv/bin/activate
+
+    # You should see (venv) at the start of your terminal prompt
+
+    # If you get an ExecutionPolicy error on Windows:
+      Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+      # Then try activating again
+
+    # Upgrade pip and install dependencies
+    python -m pip install --upgrade pip
+    pip install -r requirements.txt
+
+    # ⏰ This will take 5-15 minutes (downloads PyTorch, FAISS, ML models)
+
+  Step 3: Frontend setup
+  ──────────────────────
+    # Open a NEW terminal window, keep backend terminal open
+    cd frontend
+    npm install
+
+    # ⏰ This will take 3-5 minutes
+
+
+================================================================================
+SECTION 3 — FULL .env SETUP
+================================================================================
+
+  Create your environment file:
+    cd backend
+    copy .env.example .env       (Windows)
+    cp .env.example .env         (macOS/Linux)
+
+  Now edit backend/.env with your actual values. Below is a detailed
+  guide for EVERY variable:
+
+  ─────────────────────────────────────────────────────────────────
+  Variable: GEMINI_API_KEY_1  (through GEMINI_API_KEY_5)
+  ─────────────────────────────────────────────────────────────────
+  What it does:
+    API keys for Google's Gemini AI model. NEXORA uses these to
+    generate intelligent answers from your documents. Multiple keys
+    enable round-robin rotation to avoid rate limits.
+
+  How to get it:
+    1. Go to https://aistudio.google.com/app/apikey
+    2. Sign in with your Google account
+    3. Click "Create API Key"
+    4. Click "Create API key in new project"
+    5. Copy the key (starts with AIzaSy...)
+    6. Repeat for additional keys if desired (2-5 are optional)
+
+  Format:  AIzaSy followed by ~33 characters
+  Example: GEMINI_API_KEY_1=AIzaSyCj_Qul5FLEWKXACCkp7DfHWBKoZTKrY6U
+  Required: At least KEY_1 is REQUIRED. Keys 2-5 are optional.
+
+  ─────────────────────────────────────────────────────────────────
+  Variable: FIREBASE_SERVICE_ACCOUNT_PATH
+  ─────────────────────────────────────────────────────────────────
+  What it does:
+    Path to the Firebase Admin SDK service account JSON file.
+    Used to authenticate the backend with Firebase for Firestore
+    database operations and user auth token verification.
+
+  How to get it:
+    1. Go to https://console.firebase.google.com
+    2. Select your project (or create one)
+    3. Click the gear icon → "Project settings"
+    4. Go to "Service accounts" tab
+    5. Click "Generate new private key"
+    6. Download the JSON file
+    7. Rename it to firebase-service-account.json
+    8. Place it in the backend/ folder
+
+  Format:  Relative path to JSON file
+  Example: FIREBASE_SERVICE_ACCOUNT_PATH=./firebase-service-account.json
+  Required: YES
+
+  ─────────────────────────────────────────────────────────────────
+  Variable: UPLOAD_DIR
+  ─────────────────────────────────────────────────────────────────
+  What it does:
+    Directory where uploaded documents are temporarily stored
+    during processing. Created automatically if it doesn't exist.
+
+  Format:  Directory name (relative to backend/)
+  Example: UPLOAD_DIR=uploads
+  Required: YES (use default value)
+
+  ─────────────────────────────────────────────────────────────────
+  Variable: VECTORSTORE_DIR
+  ─────────────────────────────────────────────────────────────────
+  What it does:
+    Directory where FAISS vector indices are stored. These contain
+    the mathematical embeddings of your document text for fast
+    semantic search.
+
+  Format:  Directory name (relative to backend/)
+  Example: VECTORSTORE_DIR=vectorstore
+  Required: YES (use default value)
+
+  ─────────────────────────────────────────────────────────────────
+  Variable: MAX_UPLOAD_SIZE
+  ─────────────────────────────────────────────────────────────────
+  What it does:
+    Maximum file upload size in bytes.
+    Default: 10485760 (10 MB). Can increase up to 78643200 (75 MB).
+
+  Format:  Integer (bytes)
+  Example: MAX_UPLOAD_SIZE=10485760
+  Required: YES (use default value)
+
+  ─────────────────────────────────────────────────────────────────
+  Variable: CHUNK_SIZE / CHUNK_OVERLAP
+  ─────────────────────────────────────────────────────────────────
+  What they do:
+    CHUNK_SIZE: Number of characters per text chunk when splitting
+    documents for embedding. Larger = more context per chunk.
+    CHUNK_OVERLAP: Number of overlapping characters between chunks.
+    Ensures context isn't lost at chunk boundaries.
+
+  Format:  Integer
+  Example: CHUNK_SIZE=1000
+           CHUNK_OVERLAP=200
+  Required: YES (use default values)
+
+  ─────────────────────────────────────────────────────────────────
+  Variable: GOOGLE_SERVICE_ACCOUNT_PATH
+  ─────────────────────────────────────────────────────────────────
+  What it does:
+    Path to the Google Cloud service account JSON file. Used to
+    authenticate with Google Drive API for file operations.
+
+  How to get it:
+    1. Go to https://console.cloud.google.com
+    2. Create or select a project
+    3. Enable the "Google Drive API" in APIs & Services
+    4. Go to IAM & Admin → Service Accounts
+    5. Create a service account
+    6. Click on the account → Keys tab → Add Key → Create new key
+    7. Select JSON → Download
+    8. Rename to google-service-account.json
+    9. Place it in the backend/ folder
+
+  Format:  Relative path to JSON file
+  Example: GOOGLE_SERVICE_ACCOUNT_PATH=./google-service-account.json
+  Required: YES (for Drive features)
+
+  ─────────────────────────────────────────────────────────────────
+  Variable: GOOGLE_DRIVE_ROOT_FOLDER_ID
+  ─────────────────────────────────────────────────────────────────
+  What it does:
+    The ID of the root Google Drive folder that NEXORA manages.
+    All file operations happen within this folder.
+
+  How to get it:
+    1. Open Google Drive in your browser
+    2. Create a folder for NEXORA (or use existing)
+    3. Share this folder with your service account email
+       (the email from google-service-account.json, field: client_email)
+       Give it "Editor" access
+    4. Open the folder in Drive
+    5. Copy the folder ID from the URL:
+       https://drive.google.com/drive/folders/THIS_IS_THE_ID
+
+  Format:  Google Drive folder ID string
+  Example: GOOGLE_DRIVE_ROOT_FOLDER_ID=1aBcDeFgHiJkLmNoPqRsTuVwXyZ
+  Required: YES (for Drive features)
+
+  ─────────────────────────────────────────────────────────────────
+  Variable: GOOGLE_SERVICE_ACCOUNT_EMAIL
+  ─────────────────────────────────────────────────────────────────
+  What it does:
+    Email address of the Google Cloud service account. Used to
+    verify Drive folder sharing permissions.
+
+  How to get it:
+    Open your google-service-account.json file and copy the
+    "client_email" field value.
+
+  Format:  Email address
+  Example: GOOGLE_SERVICE_ACCOUNT_EMAIL=nexora@myproject.iam.gserviceaccount.com
+  Required: YES (for Drive features)
+
+  ─────────────────────────────────────────────────────────────────
+  Variables: GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / GOOGLE_REDIRECT_URI
+  ─────────────────────────────────────────────────────────────────
+  What they do:
+    OAuth 2.0 credentials for user-owned Google Drive connections.
+    Allows users to connect their personal Drive accounts.
+
+  How to get them:
+    1. Go to https://console.cloud.google.com → APIs & Services
+    2. Click "Credentials" → "Create Credentials" → "OAuth client ID"
+    3. Application type: "Web application"
+    4. Add authorized redirect URI:
+       http://localhost:8000/api/drive/callback (for dev)
+    5. Copy Client ID and Client Secret
+
+  Format:  OAuth credentials
+  Example: GOOGLE_CLIENT_ID=123456789.apps.googleusercontent.com
+           GOOGLE_CLIENT_SECRET=GOCSPX-abcdefghijk
+           GOOGLE_REDIRECT_URI=http://localhost:8000/api/drive/callback
+  Required: OPTIONAL (only for user Drive connections)
+
+  ─────────────────────────────────────────────────────────────────
+  Variables: CLOUDINARY_CLOUD_NAME / CLOUDINARY_API_KEY / CLOUDINARY_API_SECRET
+  ─────────────────────────────────────────────────────────────────
+  What they do:
+    Cloudinary credentials for cloud-based document storage.
+    Documents are uploaded to Cloudinary for persistent storage
+    and retrieval.
+
+  How to get them:
+    1. Sign up at https://cloudinary.com (free tier available)
+    2. Go to your Dashboard (logged in homepage)
+    3. You'll see three values displayed:
+       - Cloud Name (e.g., dxxxxxxxx)
+       - API Key (e.g., 123456789012345)
+       - API Secret (click "Reveal" to see it)
+    4. Copy all three values
+
+  Format:  Cloudinary credentials
+  Example: CLOUDINARY_CLOUD_NAME=dxxxxxxxx
+           CLOUDINARY_API_KEY=123456789012345
+           CLOUDINARY_API_SECRET=aBcDeFgHiJkLmNoPqRsTuVwXyZ
+  Required: YES
+
+
+================================================================================
+SECTION 4 — DATABASE SETUP
+================================================================================
+
+  NEXORA uses Firebase Firestore (NoSQL cloud database). There are
+  NO migrations to run. The database is schema-less and auto-creates
+  collections/documents on first write.
+
+  Setup:
+    1. Go to https://console.firebase.google.com
+    2. Select your project
+    3. Click "Firestore Database" in the left sidebar
+    4. Click "Create database"
+    5. Choose "Start in production mode"
+    6. Select a Cloud Firestore location closest to your users
+    7. Click "Enable"
+
+  Firestore Security Rules (recommended for production):
+    Go to Firestore → Rules tab and set:
+
+      rules_version = '2';
+      service cloud.firestore {
+        match /databases/{database}/documents {
+          match /users/{userId}/{document=**} {
+            allow read, write: if request.auth != null
+                               && request.auth.uid == userId;
+          }
+        }
+      }
+
+  Firebase Authentication Setup:
+    1. In Firebase Console → Authentication → Sign-in method
+    2. Enable "Email/Password"
+    3. Enable "Google" (add your OAuth client ID if prompted)
+    4. Add authorized domains (localhost for dev)
+
+
+================================================================================
+SECTION 5 — THIRD-PARTY SERVICES SETUP
+================================================================================
+
+  SERVICE: Google Gemini AI
+  ─────────────────────────
+  1. Go to https://aistudio.google.com/app/apikey
+  2. Sign in with Google account
+  3. Click "Create API Key" → "Create API key in new project"
+  4. Copy the key → paste as GEMINI_API_KEY_1 in .env
+  5. Free tier: 60 requests/minute, 1500 requests/day
+  6. For higher limits, repeat for up to 5 keys (round-robin)
+
+  SERVICE: Firebase
+  ─────────────────
+  1. Go to https://console.firebase.google.com
+  2. Click "Add project" → name it → Continue
+  3. Disable Google Analytics (optional for dev)
+  4. Click "Create project"
+  5. Add a web app: Project Overview → </> icon
+  6. Copy the firebaseConfig object
+  7. Update frontend/src/services/firebase.js with your config
+  8. Generate service account key (see Section 3)
+  9. Enable Auth providers and Firestore (see Section 4)
+
+  SERVICE: Cloudinary
+  ───────────────────
+  1. Sign up at https://cloudinary.com
+  2. Free tier includes: 25GB storage, 25GB bandwidth/month
+  3. Go to Dashboard → copy Cloud Name, API Key, API Secret
+  4. Paste into .env as CLOUDINARY_CLOUD_NAME, etc.
+  5. No additional configuration needed — NEXORA auto-creates folders
+
+  SERVICE: Google Drive API
+  ─────────────────────────
+  1. Go to https://console.cloud.google.com
+  2. Create a project (or use existing Firebase project)
+  3. Go to APIs & Services → Library
+  4. Search "Google Drive API" → Enable it
+  5. Create a Service Account (IAM & Admin → Service Accounts)
+  6. Download the JSON key → place in backend/
+  7. In Google Drive, create a root folder for NEXORA
+  8. Share that folder with the service account email (Editor access)
+  9. Copy the folder ID from the URL into .env
+
+
+================================================================================
+SECTION 6 — START DEVELOPMENT SERVER
+================================================================================
+
+  You need TWO terminal windows running simultaneously:
+
+  Terminal 1 — Backend:
+  ─────────────────────
+    cd backend
+    venv\Scripts\Activate.ps1          # Windows
+    # source venv/bin/activate          # macOS/Linux
+    uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+    Wait for:
+      INFO:     Uvicorn running on http://0.0.0.0:8000
+      INFO:     Application startup complete.
+
+  Terminal 2 — Frontend:
+  ──────────────────────
+    cd frontend
+    npm run dev
+
+    Wait for:
+      VITE v7.x.x  ready in xxx ms
+      ➜  Local:   http://localhost:5173/
+
+  Open browser → http://localhost:5173
+
+  Other useful commands:
+  ──────────────────────
+    npm run build      → Production build (outputs to frontend/dist/)
+    npm run preview    → Preview production build locally
+    npm run lint       → Lint frontend code with ESLint
+
+
+================================================================================
+SECTION 7 — DOCKER SETUP
+================================================================================
+
+  Docker is NOT currently configured for this project.
+  The recommended development setup is running the backend and
+  frontend servers directly as described in Section 6.
+
+  For containerized deployment in the future:
+    # Example Dockerfile for backend
+    FROM python:3.11-slim
+    WORKDIR /app
+    COPY requirements.txt .
+    RUN pip install --no-cache-dir -r requirements.txt
+    COPY app/ ./app/
+    CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+
+================================================================================
+SECTION 8 — COMMON ERRORS & FIXES
+================================================================================
+
+  ERROR: ModuleNotFoundError: No module named 'fastapi'
+  FIX:   Virtual environment not activated. Run:
+         venv\Scripts\Activate.ps1    (Windows)
+         source venv/bin/activate     (macOS/Linux)
+         Then: pip install -r requirements.txt
+
+  ERROR: Cannot activate venv / ExecutionPolicy error (Windows)
+  FIX:   Run in PowerShell as Administrator:
+         Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+         Then try activating again.
+
+  ERROR: Gemini API error / 429 Too Many Requests
+  FIX:   You've hit the Gemini rate limit. Solutions:
+         1. Wait 60 seconds and try again
+         2. Add more API keys (GEMINI_API_KEY_2 through _5)
+         3. Check your key at https://aistudio.google.com/app/apikey
+
+  ERROR: Firebase connection failed / PreconditionError
+  FIX:   1. Verify firebase-service-account.json exists in backend/
+         2. Check FIREBASE_SERVICE_ACCOUNT_PATH in .env
+         3. Ensure Firestore is enabled in Firebase Console
+
+  ERROR: Port 8000 already in use
+  FIX:   Windows:
+           netstat -ano | findstr :8000
+           taskkill /F /PID <PID_NUMBER>
+         macOS/Linux:
+           kill -9 $(lsof -t -i:8000)
+         Or use a different port:
+           uvicorn app.main:app --reload --port 8001
+
+  ERROR: Port 5173 already in use
+  FIX:   Windows:
+           netstat -ano | findstr :5173
+           taskkill /F /PID <PID_NUMBER>
+         Vite auto-picks the next available port, but you can force:
+           npx vite --port 5174
+
+  ERROR: Upload fails / 413 Request Entity Too Large
+  FIX:   File exceeds MAX_UPLOAD_SIZE. Increase it in .env:
+         MAX_UPLOAD_SIZE=78643200    (75 MB)
+
+  ERROR: CORS error in browser console
+  FIX:   Backend not running, or running on wrong port.
+         Verify backend is at http://localhost:8000
+         Check CORS origins in backend/app/main.py
+
+  ERROR: Google Drive "Insufficient permissions"
+  FIX:   1. Share the Drive folder with service account email
+         2. Give "Editor" role
+         3. Verify GOOGLE_DRIVE_ROOT_FOLDER_ID is correct
+
+  ERROR: npm install fails with node-gyp errors
+  FIX:   1. Update Node.js to latest LTS
+         2. Windows: Install Build Tools:
+            npm install -g windows-build-tools
+         3. Delete node_modules and package-lock.json, retry
+
+
+================================================================================
+SECTION 9 — PRODUCTION DEPLOYMENT
+================================================================================
+
+  Option A — Vercel (Frontend) + Railway (Backend):
+  ──────────────────────────────────────────────────
+    Frontend:
+      1. Push code to GitHub
+      2. Go to https://vercel.com/new
+      3. Import your repo → select frontend/ as root directory
+      4. Framework: Vite
+      5. Deploy
+
+    Backend:
+      1. Go to https://railway.app → New Project
+      2. Deploy from GitHub → select your repo
+      3. Set root directory to backend/
+      4. Add all .env variables in Railway dashboard
+      5. Start command: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+      6. Deploy
+
+    Post-deploy:
+      - Update API_BASE_URL in frontend/src/services/api.js
+        to your Railway backend URL
+      - Add your Vercel domain to CORS origins in backend/app/main.py
+      - Add your domain to Firebase authorized domains
+
+  Option B — Render:
+  ──────────────────
+    Frontend:
+      1. Go to https://render.com → New → Static Site
+      2. Connect GitHub repo → root: frontend/
+      3. Build command: npm run build
+      4. Publish directory: dist
+
+    Backend:
+      1. New → Web Service
+      2. Connect GitHub → root: backend/
+      3. Build command: pip install -r requirements.txt
+      4. Start command: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+      5. Add all env vars in Environment tab
+
+  Option C — VPS (DigitalOcean, AWS EC2, etc.):
+  ──────────────────────────────────────────────
+    1. SSH into your server
+    2. Install Python 3.11, Node.js 18, nginx
+    3. Clone the repo
+    4. Backend:
+         cd backend
+         python -m venv venv && source venv/bin/activate
+         pip install -r requirements.txt
+         cp .env.example .env && nano .env    # add real values
+         # Use gunicorn + uvicorn workers for production:
+         gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
+    5. Frontend:
+         cd frontend
+         npm install && npm run build
+    6. Configure nginx to:
+         - Serve frontend/dist/ on port 80/443
+         - Proxy /api requests to localhost:8000
+    7. Use systemd or PM2 to keep backend running
+    8. Set up SSL with Let's Encrypt (certbot)
+
+
+================================================================================
+END OF SETUP GUIDE
+================================================================================

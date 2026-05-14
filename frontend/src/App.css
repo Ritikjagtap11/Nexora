@@ -1,0 +1,78 @@
+@import "tailwindcss";
+
+@theme {
+  --color-primary: #F95F9E;
+  --color-primary-light: #FC9CBF;
+  --color-secondary: #F4F1AD;
+  --color-accent: #C2F4FF;
+  --color-background: #FFFFFF;
+  --color-background-dark: #0F172A;
+  --color-cards: #FFFFFF;
+  --color-cards-dark: #1E293B;
+  --font-sans: "Inter", sans-serif;
+}
+
+@custom-variant dark (&:is(.dark *));
+
+@layer base {
+  body {
+    @apply bg-background text-gray-900 transition-colors duration-300;
+  }
+
+  .dark body {
+    @apply bg-background-dark text-white;
+  }
+}
+
+@layer components {
+  .glass {
+    @apply bg-white/40 backdrop-blur-md border border-white/40 shadow-sm;
+  }
+
+  .dark .glass {
+    @apply bg-white/5 backdrop-blur-lg border border-white/10 shadow-none;
+  }
+
+  .glass-card {
+    @apply bg-white/60 backdrop-blur-xl border border-white/50 rounded-2xl shadow-xl;
+  }
+
+  .dark .glass-card {
+    @apply bg-cards-dark/80 backdrop-blur-xl border border-white/5 rounded-2xl shadow-xl;
+  }
+
+  .text-gradient {
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-primary to-accent;
+  }
+}
+:root {
+  --app-bg: radial-gradient(ellipse 80% 60% at 50% 0%, rgba(249,95,158,0.18) 0%, transparent 50%), radial-gradient(ellipse 60% 50% at 85% 20%, rgba(194,244,255,0.30) 0%, transparent 50%), radial-gradient(ellipse 50% 40% at 15% 70%, rgba(244,241,173,0.25) 0%, transparent 50%), radial-gradient(ellipse 40% 30% at 50% 100%, rgba(252,156,191,0.12) 0%, transparent 50%), #FFFFFF;
+}
+
+.dark {
+  --app-bg: radial-gradient(ellipse 80% 60% at 50% 0%, rgba(249,95,158,0.15) 0%, transparent 50%), radial-gradient(ellipse 60% 50% at 80% 30%, rgba(194,244,255,0.12) 0%, transparent 50%), radial-gradient(ellipse 50% 40% at 20% 70%, rgba(244,241,173,0.10) 0%, transparent 50%), #0F172A;
+}
+
+.app-background {
+  background: var(--app-bg) !important;
+}
+
+/* Modal Animations */
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(.92) translateY(10px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.animate-fadeIn {
+  animation: fadeIn .25s ease-out;
+}
+
+.animate-scaleIn {
+  animation: scaleIn .25s ease-out;
+}
