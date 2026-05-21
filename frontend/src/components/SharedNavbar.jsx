@@ -12,8 +12,8 @@ export default function SharedNavbar() {
   const getTabClass = (path) => {
     const isActive = location.pathname === path;
     return isActive 
-      ? "px-2 sm:px-4 py-1 sm:py-1.5 text-[11px] sm:text-sm font-semibold rounded-lg bg-white dark:bg-white/10 text-primary dark:text-white shadow-sm border border-gray-200/50 dark:border-white/5 transition-all"
-      : "px-2 sm:px-4 py-1 sm:py-1.5 text-[11px] sm:text-sm font-medium text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white transition-colors";
+      ? "px-1.5 sm:px-4 py-1 sm:py-1.5 text-[10px] sm:text-sm font-semibold rounded-lg bg-white dark:bg-white/10 text-primary dark:text-white shadow-sm border border-gray-200/50 dark:border-white/5 transition-all"
+      : "px-1.5 sm:px-4 py-1 sm:py-1.5 text-[10px] sm:text-sm font-medium text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white transition-colors";
   };
 
   return (

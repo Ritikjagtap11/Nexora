@@ -3,8 +3,11 @@ from fastapi.security import OAuth2PasswordBearer
 from firebase_admin import auth as firebase_auth
 from app.database import get_firestore
 import time
+import contextvars
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
+
+current_user_id_ctx = contextvars.ContextVar("current_user_id_ctx", default=None)
 
 async def get_current_user(token: str = Depends(oauth2_scheme)):
     credentials_exception = HTTPException(
@@ -27,6 +30,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         uid = decoded_token.get("uid")
         if not uid:
             raise credentials_exception
+        current_user_id_ctx.set(uid)
     except Exception as e:
         print("Token verification error:", e)
         raise credentials_exception

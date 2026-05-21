@@ -130,7 +130,7 @@ export default function Landing() {
           </div>
 
           {/* Heading */}
-          <h1 className="text-4xl sm:text-5xl md:text-6xl lg:text-7xl font-extrabold tracking-tight text-gray-900 dark:text-white mb-6 leading-[1.1]">
+          <h1 className="text-3xl sm:text-4xl lg:text-6xl font-extrabold tracking-tight text-gray-900 dark:text-white mb-6 leading-[1.1]">
             Your Knowledge,{' '}
             <span className="bg-clip-text text-transparent bg-gradient-to-r from-primary via-pink-400 to-accent">
               Instantly Searchable
@@ -143,14 +143,16 @@ export default function Landing() {
             citations — powered by advanced AI retrieval.
           </p>
 
-          {/* CTA Button */}
-          <button
-            onClick={handleStartExploring}
-            className="group flex items-center justify-center gap-2.5 px-8 py-4 rounded-2xl font-bold text-lg bg-primary hover:bg-primary-light text-white transition-all duration-300 shadow-xl shadow-primary/25 hover:shadow-2xl hover:shadow-primary/35 hover:-translate-y-0.5 cursor-pointer"
-          >
-            Start Exploring
-            <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform duration-200" />
-          </button>
+          {/* CTA Buttons Container */}
+          <div className="flex flex-col sm:flex-row gap-3 justify-center w-full sm:w-auto px-4">
+            <button
+              onClick={handleStartExploring}
+              className="group flex items-center justify-center gap-2.5 px-8 py-4 rounded-2xl font-bold text-lg bg-primary hover:bg-primary-light text-white transition-all duration-300 shadow-xl shadow-primary/25 hover:shadow-2xl hover:shadow-primary/35 hover:-translate-y-0.5 cursor-pointer w-full sm:w-auto"
+            >
+              Start Exploring
+              <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform duration-200" />
+            </button>
+          </div>
         </main>
 
         {/* Stats Panel — inside hero, at the bottom */}

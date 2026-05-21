@@ -52,6 +52,7 @@ export default function Dashboard() {
 
   const [recentDocs, setRecentDocs] = useState([]);
   const [driveFolders, setDriveFolders] = useState([]);
+  const [driveConnected, setDriveConnected] = useState(false);
   const [previewFile, setPreviewFile] = useState(null);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [foldersLoading, setFoldersLoading] = useState(false);
@@ -68,7 +69,7 @@ export default function Dashboard() {
   const [globalSearchResults, setGlobalSearchResults] = useState(null);
   const [isSearching, setIsSearching] = useState(false);
 
-  // ── FIXED: use driveAPI.getFolders() instead of raw fetch ──────────────────
+  // ── FIXED: fetch actual folders from user's personal Google Drive via OAuth ─────
   const fetchFolders = async (isManual = false) => {
     // 🧠 Try cache first (only if not manual refresh)
     if (!isManual) {
@@ -79,6 +80,7 @@ export default function Dashboard() {
         console.log("⚡ Using cached folders");
         setDriveFolders(cachedFolders);
         setFolderFileCounts(cachedCounts);
+        setDriveConnected(true);
         return;
       }
     }
@@ -86,25 +88,31 @@ export default function Dashboard() {
     setFoldersLoading(true);
 
     try {
-      const foldersData = await driveAPI.listFolders();
+      // 1. Check if user's Google Drive OAuth is connected
+      const statusData = await driveAPI.getConnectionStatus();
+      const isConnected = !!statusData.connected;
+      setDriveConnected(isConnected);
+
+      if (!isConnected) {
+        setDriveFolders([]);
+        return;
+      }
+
+      // 2. Fetch the folders from the user's My Drive root folder
+      const foldersData = await driveAPI.listMyDrive('root');
       const folders = Array.isArray(foldersData)
         ? foldersData
         : foldersData.folders || [];
 
       setDriveFolders(folders);
 
+      // 3. Count files inside each folder (also via per-user OAuth my-drive helper)
       const counts = {};
       await Promise.all(
         folders.map(async (folder) => {
           try {
-            const contents = await driveAPI.listFolderContents(folder.id);
-            const files =
-              contents.files ||
-              contents.items ||
-              contents.documents ||
-              contents ||
-              [];
-
+            const contents = await driveAPI.listMyDrive(folder.id);
+            const files = contents.files || contents.items || contents.documents || contents || [];
             counts[folder.id] = Array.isArray(files) ? files.length : 0;
           } catch {
             counts[folder.id] = 0;
@@ -444,7 +452,7 @@ const greeting = getGreetingData();
       <SharedNavbar />
 
       {/* ━━━ MAIN CONTENT ━━━ */}
-      <main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-8 flex flex-col gap-6" style={{ paddingTop: "88px" }}>
+      <main className="flex-1 w-full max-w-7xl mx-auto px-3 sm:px-4 py-6 sm:py-8 flex flex-col gap-6" style={{ paddingTop: "88px" }}>
 
         {/* SECTION 1 — Welcome Banner */}
         <section className="glass-card w-full p-6 sm:p-8 flex flex-col md:flex-row items-start md:items-center justify-between gap-6 relative overflow-hidden">
@@ -472,7 +480,7 @@ const greeting = getGreetingData();
         </section>
 
         {/* SECTION 2 — Stats Row */}
-        <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
+        <section className="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
           {[
             { label: 'Documents indexed', value: '24', icon: <FileText className="w-5 h-5 text-primary" />, change: '+3 this week', color: 'from-primary/10 to-transparent', textColor: 'text-primary' },
             { label: 'Queries answered', value: '148', icon: <MessageSquare className="w-5 h-5 text-emerald-500" />, change: '+22 today', color: 'from-emerald-500/10 to-transparent', textColor: 'text-emerald-500' },
@@ -496,9 +504,9 @@ const greeting = getGreetingData();
 
 
         {/* SECTION 4 — Two Column Grid */}
-        <section className="grid grid-cols-1 lg:grid-cols-5 gap-6">
+        <section className="flex flex-col lg:flex-row gap-6">
           {/* LEFT: Recent Documents (60% -> col-span-3) */}
-          <div className="lg:col-span-3 glass-card flex flex-col">
+          <div className="w-full lg:w-3/5 glass-card flex flex-col">
             <div className="p-5 sm:p-6 border-b border-gray-100 dark:border-white/5 flex justify-between items-center">
               <h2 className="font-bold text-lg text-gray-900 dark:text-white">Recent documents</h2>
               <div className="flex items-center gap-3">
@@ -547,7 +555,7 @@ const greeting = getGreetingData();
                 else if (ext === 'xlsx' || ext === 'xls' || ext === 'csv') colorClass = 'text-green-500 bg-green-50 dark:bg-green-500/10 border-green-100 dark:border-green-500/20';
 
                 return (
-                  <div key={id || i} className="flex items-center justify-between p-3 sm:p-4 rounded-xl hover:bg-white/60 dark:hover:bg-white/5 transition-colors border border-transparent hover:border-gray-100 dark:hover:border-white/5 group cursor-pointer" onClick={() => setPreviewFile({ ...doc, id, name, summary: doc.summary || doc.ai_summary })}>
+                  <div key={id || i} className="flex items-center justify-between p-3 sm:p-4 rounded-xl hover:bg-white/60 dark:hover:bg-white/5 transition-colors border border-transparent hover:border-gray-100 dark:hover:border-white/5 group">
                     <div className="flex items-center gap-3 sm:gap-4 overflow-hidden">
                       <div className={`w-10 h-10 shrink-0 rounded-lg flex items-center justify-center border ${colorClass}`}>
                         {React.createElement(icon, { className: "w-5 h-5" })}
@@ -575,7 +583,7 @@ const greeting = getGreetingData();
           </div>
 
           {/* RIGHT: Quick Chat (40% -> col-span-2) */}
-          <div className="lg:col-span-2 glass-card flex flex-col overflow-hidden h-[450px] lg:h-auto">
+          <div className="w-full lg:w-2/5 glass-card flex flex-col overflow-hidden h-[450px] lg:h-auto">
             <div className="p-5 border-b border-gray-100 dark:border-white/5 flex justify-between items-center bg-white/40 dark:bg-white/5">
               <h2 className="font-bold text-lg text-gray-900 dark:text-white">Meet Nexora AI</h2>
               <button onClick={() => navigate('/app/chat')} className="text-xs font-medium text-primary hover:text-primary-light transition-colors flex items-center gap-1">
@@ -646,7 +654,7 @@ const greeting = getGreetingData();
             </div>
           </div>
 
-          <div className="p-5 sm:p-6 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+          <div className="p-5 sm:p-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {foldersLoading ? (
               [1, 2, 3, 4].map(i => (
                 <div key={i} className="bg-white/60 dark:bg-background-dark/40 border border-gray-200/60 dark:border-white/10 rounded-xl p-4 animate-pulse">
@@ -660,15 +668,33 @@ const greeting = getGreetingData();
                   <div className="h-2 bg-gray-100 dark:bg-white/5 rounded w-full mt-2" />
                 </div>
               ))
+            ) : !driveConnected ? (
+              <div className="col-span-full py-8 px-4 text-center flex flex-col items-center justify-center gap-3">
+                <div className="w-12 h-12 rounded-full bg-primary/10 flex items-center justify-center text-primary">
+                  <HardDrive className="w-6 h-6" />
+                </div>
+                <p className="text-sm font-semibold text-gray-700 dark:text-gray-300">
+                  Google Drive is not connected
+                </p>
+                <p className="text-xs text-gray-500 max-w-sm">
+                  Connect your Google Drive using your personal account to browse all folders and chat with your documents using AI.
+                </p>
+                <button
+                  onClick={() => navigate('/app/drive')}
+                  className="px-5 py-2.5 rounded-xl text-xs font-bold bg-primary hover:bg-primary-light text-white transition-all shadow-md shadow-primary/20 hover:shadow-lg hover:shadow-primary/30"
+                >
+                  🔗 Connect Drive
+                </button>
+              </div>
             ) : (
               <>
-                {driveFolders.length === 0 && <div className="text-sm text-gray-500 p-4">No folders found.</div>}
+                {driveFolders.length === 0 && <div className="text-sm text-gray-500 p-4">No folders found in My Drive root.</div>}
                 {driveFolders.map((folder, i) => {
                   const colors = ['indigo', 'emerald', 'amber', 'blue', 'purple'];
                   const c = colors[i % colors.length];
                   const colorClass = colorMap[c];
                   const fileCount = folderFileCounts[folder.id] ?? 0;
-                  const updatedAt = folder.updated_at || folder.modified_at || folder.created_at;
+                  const updatedAt = folder.updated_at || folder.modifiedTime || folder.createdTime;
                   return (
                     <div key={folder.id} className="bg-white/60 dark:bg-background-dark/40 border border-gray-200/60 dark:border-white/10 rounded-xl p-4 hover:-translate-y-1 hover:shadow-md hover:border-primary/30 transition-all group cursor-pointer" onClick={() => navigate('/app/drive')}>
                       <div className="flex items-start gap-3 mb-3">

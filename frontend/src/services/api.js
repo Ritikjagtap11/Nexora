@@ -244,6 +244,20 @@ export const driveAPI = {
     });
     return response.data;
   },
+
+  // ── NEW: Get Google Drive connection status for current user ─────────────
+  getConnectionStatus: async () => {
+    const response = await api.get('/api/drive/status');
+    return response.data;
+  },
+
+  // ── NEW: List files & folders from the user's personal Google Drive ──────
+  listMyDrive: async (folderId = 'root') => {
+    const response = await api.get('/api/drive/my-drive', {
+      params: { folder_id: folderId },
+    });
+    return response.data;
+  },
 };
 
 export default api;

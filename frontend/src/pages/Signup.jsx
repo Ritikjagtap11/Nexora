@@ -106,7 +106,7 @@ export default function Signup() {
       <div className="absolute top-0 left-0 w-[500px] h-[500px] rounded-full bg-primary/20 dark:bg-primary/10 blur-[100px] pointer-events-none" />
       <div className="absolute bottom-0 right-0 w-[400px] h-[400px] rounded-full bg-secondary/30 dark:bg-secondary/10 blur-[100px] pointer-events-none" />
       
-      <div className="glass-card w-full max-w-md p-8 relative z-10">
+      <div className="glass-card w-full max-w-md p-6 sm:p-8 relative z-10 mx-auto">
         <div className="flex flex-col items-center mb-8">
           <div className="w-25 h-16 bg-white dark:bg-white/5 rounded-2xl flex items-center justify-center mb-4 shadow-sm border border-gray-100 dark:border-white/10">
             <img src={getLogo()} alt="NEXORA Logo" className="h-7 " />

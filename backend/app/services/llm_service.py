@@ -1,6 +1,5 @@
 import time
 import json
-import requests
 import logging
 import google.generativeai as genai
 
@@ -39,7 +38,7 @@ class GeminiKeyRotator:
             if state["cooldown_until"] <= now:
                 return self._keys[idx]
             self._current_idx += 1
-        logger.warning("All Gemini keys cooling — falling back to Ollama.")
+        logger.warning("All Gemini keys cooling — no fallback available.")
         return None
 
     def mark_used(self):
@@ -81,17 +80,7 @@ class GeminiKeyRotator:
 
 
 class LLMService:
-    OLLAMA_BASE  = "http://localhost:11434"
-    OLLAMA_MODEL = "llama3.2:1b"
     GEMINI_MODEL = "gemini-2.5-flash"
-
-    OLLAMA_FATAL_PHRASES = (
-        "model runner has unexpectedly stopped",
-        "resource limitations",
-        "internal error",
-        "out of memory",
-        "oom",
-    )
 
     def __init__(self):
         self.last_used_provider: Optional[str] = None
@@ -109,8 +98,6 @@ class LLMService:
             logger.info(f"✓ Gemini ready — {self.rotator.total_keys} key(s).")
         else:
             logger.warning("✗ No Gemini keys — Ollama only.")
-
-        self.ollama_available = self._check_ollama()
 
     # ── Public: generate_response_stream ───────────────────────────────
     def generate_response_stream(
@@ -175,39 +162,9 @@ class LLMService:
                         logger.warning(f"⚠️ Gemini failed ({e}) — switching to Ollama.")
                         break
 
-        # ── Fallback: Ollama ────────────────────────────────────────────
-        if not self.ollama_available:
-            self.ollama_available = self._check_ollama()
-
-        if self.ollama_available:
-            logger.info("✅ Responding via Ollama (fallback)")
-            try:
-                gen = self._generate_ollama_stream(
-                    query, context_text, doc_names, is_multi_doc, conversation_history
-                )
-                first = next(gen)
-                self.last_used_provider = "ollama"
-                yield first, "ollama"
-                for chunk in gen:
-                    yield chunk, "ollama"
-                return
-
-            except _OllamaFatalError as e:
-                logger.error(f"Ollama fatal crash: {e}")
-                self.ollama_available = False
-                raise Exception(
-                    "The local Ollama model crashed (likely out of memory). "
-                    "Try restarting Ollama or using a smaller model. "
-                    "Gemini will be used automatically once keys are available."
-                )
-
-            except Exception as e:
-                logger.error(f"Ollama also failed: {e}")
-                raise Exception(f"Both Gemini and Ollama failed. Last error: {e}")
-
         raise Exception(
-            "No AI engine is currently available. "
-            "Please configure a Gemini API key or ensure Ollama is running."
+            "No Gemini keys are currently available. All keys are on cooldown or exhausted. "
+            "Please try again in a moment or contact support."
         )
 
     # ── Professional system prompt ──────────────────────────────────────
@@ -337,93 +294,6 @@ that would help the user get a more complete answer.
             if text:
                 yield text
 
-    # ── Ollama (non-streaming, single shot) ────────────────────────────
-    def _generate_ollama_stream(
-        self,
-        query: str,
-        context_text: str,
-        doc_names: List[str],
-        is_multi_doc: bool,
-        conversation_history: Optional[List[dict]],
-    ) -> Generator[str, None, None]:
-        if is_multi_doc:
-            doc_label = f"from these {len(doc_names)} documents: {', '.join(doc_names)}"
-        else:
-            doc_label = f'from this document: "{doc_names[0] if doc_names else "the document"}"'
-
-        system_content = (
-            f"You are NEXORA, a professional document assistant. "
-            f"Answer ONLY from {doc_label}. Never use outside knowledge. "
-            "Format your response professionally using markdown: "
-            "**bold** for key terms, bullet points for lists, numbered steps for processes. "
-            "Keep paragraphs short. Be concise and precise. "
-            "If the answer is not in the context, say: 'This information is not found in the selected document(s).'"
-        )
-        user_content = (
-            f"Document excerpts:\n{context_text}\n\n"
-            f"Question: {query}\n\n"
-            "Instructions:\n"
-            "1. Answer ONLY from the excerpts above\n"
-            "2. Use **bold** for important terms\n"
-            "3. Use bullet points (- ) for lists\n"
-            "4. Use numbered steps for processes\n"
-            "5. Add a brief heading if the answer covers multiple topics\n"
-            "6. Be concise — no padding or repetition\n\n"
-            "Answer:"
-        )
-
-        payload = {
-            "model": self.OLLAMA_MODEL,
-            "messages": [
-                {"role": "system", "content": system_content},
-                {"role": "user",   "content": user_content},
-            ],
-            "stream": False,
-            "options": {"temperature": 0.1, "num_predict": 1024},
-        }
-
-        try:
-            response = requests.post(
-                f"{self.OLLAMA_BASE}/api/chat",
-                json=payload,
-                timeout=120,
-            )
-        except requests.exceptions.ConnectionError as e:
-            self.ollama_available = False
-            raise Exception(f"Ollama connection refused: {e}")
-        except requests.exceptions.Timeout:
-            raise Exception("Ollama timed out after 120s.")
-
-        if response.status_code != 200:
-            body = response.text[:300]
-            body_lower = body.lower()
-            if response.status_code == 500 and any(
-                phrase in body_lower for phrase in self.OLLAMA_FATAL_PHRASES
-            ):
-                raise _OllamaFatalError(f"Ollama model crash: {body}")
-            raise Exception(f"Ollama HTTP {response.status_code}: {body}")
-
-        try:
-            content = response.json()["message"]["content"]
-        except (KeyError, ValueError) as e:
-            raise Exception(f"Ollama returned unexpected response format: {e}")
-
-        yield content
-
-    # ── Ollama health check ─────────────────────────────────────────────
-    def _check_ollama(self) -> bool:
-        try:
-            resp = requests.get(f"{self.OLLAMA_BASE}/api/tags", timeout=3)
-            if resp.status_code == 200:
-                names = [m.get("name", "") for m in resp.json().get("models", [])]
-                if any(self.OLLAMA_MODEL in n for n in names):
-                    logger.info(f"✓ Ollama available — model: {self.OLLAMA_MODEL}")
-                    return True
-                logger.warning(f"✗ Ollama running but '{self.OLLAMA_MODEL}' not found. Available: {names}")
-        except Exception as e:
-            logger.warning(f"✗ Ollama not reachable: {e}")
-        return False
-
     def get_status(self) -> Dict:
         return {
             "gemini": {
@@ -431,27 +301,17 @@ that would help the user get a more complete answer.
                 "model": self.GEMINI_MODEL,
                 "key_states": self.rotator.get_status(),
             },
-            "ollama": {
-                "available": self.ollama_available,
-                "model": self.OLLAMA_MODEL,
-            },
             "last_used_provider": self.last_used_provider,
             "last_switch_reason": self.last_switch_reason,
-            "primary_provider": "gemini" if self.rotator.total_keys > 0 else "ollama",
+            "primary_provider": "gemini" if self.rotator.total_keys > 0 else "none",
             "available_providers": (
-                (["gemini"] if self.rotator.total_keys > 0 else []) +
-                (["ollama"] if self.ollama_available else [])
+                ["gemini"] if self.rotator.total_keys > 0 else []
             ),
-            "model": self.GEMINI_MODEL if self.rotator.total_keys > 0 else self.OLLAMA_MODEL,
+            "model": self.GEMINI_MODEL,
         }
 
 
 class _QuotaError(Exception):
-    pass
-
-
-class _OllamaFatalError(Exception):
-    """Raised when Ollama crashes (HTTP 500 / model runner stopped / OOM)."""
     pass
 
 

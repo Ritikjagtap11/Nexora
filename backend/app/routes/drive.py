@@ -34,6 +34,188 @@ scan_jobs = {}
 router = APIRouter(prefix="/api/drive", tags=["drive"])
 
 
+from google_auth_oauthlib.flow import Flow
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request as GoogleRequest
+from fastapi.responses import RedirectResponse
+
+DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+
+def _build_oauth_flow():
+    return Flow.from_client_config(
+        {
+            "web": {
+                "client_id": settings.GOOGLE_CLIENT_ID,
+                "client_secret": settings.GOOGLE_CLIENT_SECRET,
+                "redirect_uris": [settings.GOOGLE_REDIRECT_URI],
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+            }
+        },
+        scopes=DRIVE_SCOPES,
+        redirect_uri=settings.GOOGLE_REDIRECT_URI,
+    )
+
+
+def _get_user_oauth_credentials(uid: str):
+    """Load user OAuth credentials from Firestore. Returns None if not connected."""
+    try:
+        db = get_firestore()
+        doc = db.collection("users").document(uid).get()
+        if not doc.exists:
+            return None
+        data = doc.to_dict().get("google_oauth")
+        if not data or not data.get("access_token"):
+            return None
+        expiry = None
+        if data.get("expires_at"):
+            try:
+                expiry = datetime.utcfromtimestamp(data["expires_at"])
+            except Exception:
+                pass
+
+        creds = Credentials(
+            token=data["access_token"],
+            refresh_token=data.get("refresh_token"),
+            token_uri=data.get("token_uri", "https://oauth2.googleapis.com/token"),
+            client_id=settings.GOOGLE_CLIENT_ID,
+            client_secret=settings.GOOGLE_CLIENT_SECRET,
+            scopes=DRIVE_SCOPES,
+            expiry=expiry,
+        )
+        if creds.expired and creds.refresh_token:
+            creds.refresh(GoogleRequest())
+            db.collection("users").document(uid).set({
+                "google_oauth": {
+                    "access_token": creds.token,
+                    "refresh_token": creds.refresh_token,
+                    "token_uri": creds.token_uri,
+                    "expires_at": creds.expiry.timestamp() if creds.expiry else None,
+                }
+            }, merge=True)
+        return creds
+    except Exception as e:
+        logger.error(f"[OAUTH] Credential load error: {e}")
+        return None
+
+
+@router.get("/oauth/auth-url")
+async def get_drive_oauth_url(current_user: dict = Depends(get_current_user)):
+    """Returns Google OAuth consent URL for the user to connect their Drive."""
+    flow = _build_oauth_flow()
+    auth_url, _ = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="true",
+        prompt="consent",
+        state=current_user["id"],
+    )
+    # Store PKCE verifier to avoid invalid_grant/missing code verifier error
+    uid = current_user["id"]
+    db = get_firestore()
+    db.collection("users").document(uid).set({
+        "google_oauth_code_verifier": flow.code_verifier
+    }, merge=True)
+    return {"auth_url": auth_url}
+
+
+@router.get("/oauth/callback")
+async def drive_oauth_callback(code: str, state: str):
+    """Handles Google OAuth callback — saves tokens to Firestore, redirects to frontend."""
+    try:
+        flow = _build_oauth_flow()
+        uid = state
+        db = get_firestore()
+        user_doc = db.collection("users").document(uid).get()
+        code_verifier = None
+        if user_doc.exists:
+            code_verifier = user_doc.to_dict().get("google_oauth_code_verifier")
+
+        flow.fetch_token(code=code, code_verifier=code_verifier)
+        creds = flow.credentials
+        db.collection("users").document(uid).set({
+            "google_oauth": {
+                "access_token": creds.token,
+                "refresh_token": creds.refresh_token,
+                "token_uri": creds.token_uri,
+                "expires_at": creds.expiry.timestamp() if creds.expiry else None,
+            },
+            "google_oauth_code_verifier": None # Clean up
+        }, merge=True)
+        logger.info(f"[OAUTH] Drive connected for user: {uid}")
+        # Redirect user back to frontend Drive page
+        frontend_url = settings.GOOGLE_REDIRECT_URI.split("/api/")[0]
+        if "127.0.0.1:8000" in frontend_url:
+            frontend_url = frontend_url.replace("127.0.0.1:8000", "localhost:5173")
+        elif "localhost:8000" in frontend_url:
+            frontend_url = frontend_url.replace("localhost:8000", "localhost:5173")
+        return RedirectResponse(url=f"{frontend_url}/app/drive?connected=true")
+    except Exception as e:
+        logger.error(f"[OAUTH] Callback error: {e}")
+        raise HTTPException(status_code=400, detail=f"OAuth failed: {str(e)}")
+
+
+@router.get("/status")
+async def get_drive_connection_status(current_user: dict = Depends(get_current_user)):
+    """Returns whether the current user has connected their Google Drive."""
+    creds = _get_user_oauth_credentials(current_user["id"])
+    connected = creds is not None and creds.valid
+    logger.info(f"[OAUTH] Drive status for {current_user['id']}: connected={connected}")
+    return {"connected": connected}
+
+
+@router.delete("/disconnect")
+async def disconnect_user_drive(current_user: dict = Depends(get_current_user)):
+    """Removes the user's Google Drive OAuth tokens from Firestore."""
+    db = get_firestore()
+    db.collection("users").document(current_user["id"]).set(
+        {"google_oauth": None}, merge=True
+    )
+    logger.info(f"[OAUTH] Drive disconnected for user: {current_user['id']}")
+    return {"disconnected": True}
+
+
+@router.get("/my-drive")
+async def list_user_my_drive(
+    folder_id: str = "root",
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Lists files and folders from the authenticated user's OWN Google Drive.
+    Uses their personal OAuth token — NOT the service account.
+    folder_id defaults to 'root' = My Drive root.
+    Pass a folder_id to browse inside a subfolder.
+    """
+    creds = _get_user_oauth_credentials(current_user["id"])
+    if not creds or not creds.valid:
+        raise HTTPException(
+            status_code=403,
+            detail="Google Drive not connected. Please connect your Drive first."
+        )
+    try:
+        from googleapiclient.discovery import build as gdrive_build
+        service = gdrive_build("drive", "v3", credentials=creds, static_discovery=True)
+        results = service.files().list(
+            q=f"'{folder_id}' in parents and trashed=false",
+            fields="files(id, name, mimeType, size, modifiedTime, webViewLink, parents)",
+            orderBy="folder,name",
+            pageSize=200,
+        ).execute()
+        items = results.get("files", [])
+        folders = [i for i in items if i["mimeType"] == "application/vnd.google-apps.folder"]
+        files = [i for i in items if i["mimeType"] != "application/vnd.google-apps.folder"]
+        return {
+            "connected": True,
+            "folder_id": folder_id,
+            "folders": folders,
+            "files": files,
+            "folder_count": len(folders),
+            "file_count": len(files),
+        }
+    except Exception as e:
+        logger.error(f"[MY DRIVE] Error listing drive for {current_user['id']}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _get_file_type(filename: str) -> str:
@@ -70,6 +252,116 @@ ALLOWED_MIME_PREFIXES = (
 )
 
 
+def _get_user_oauth_creds(uid: str):
+    """Load user OAuth creds from Firestore. Returns None if not connected."""
+    return _get_user_oauth_credentials(uid)
+
+
+# ── POST /api/drive/my-scan ───────────────────────────────────────────────────
+@router.post("/my-scan")
+async def start_my_drive_scan(
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Starts a deep scan of the user's OWN Google Drive (root + all subfolders).
+    Uses their personal OAuth token — NOT the service account.
+    """
+    creds = _get_user_oauth_creds(current_user["id"])
+    if not creds or not creds.valid:
+        raise HTTPException(status_code=403, detail="Drive not connected.")
+
+    job_id = str(uuid.uuid4())
+    scan_jobs[job_id] = {
+        "status": "running",
+        "scanned": 0,
+        "total": 0,
+        "current_file": "",
+        "files": [],
+        "failed": [],
+    }
+    background_tasks.add_task(deep_scan_user_drive, job_id, current_user["id"])
+    return {"job_id": job_id}
+
+
+def deep_scan_user_drive(job_id: str, uid: str):
+    """
+    Recursively scans ALL files in user's My Drive.
+    Files are pushed to scan_jobs IMMEDIATELY as each folder is scanned
+    so the frontend sees live progress without waiting for full traversal.
+    """
+    try:
+        creds = _get_user_oauth_creds(uid)
+        if not creds or not creds.valid:
+            scan_jobs[job_id]["status"] = "failed"
+            return
+
+        from googleapiclient.discovery import build as gdrive_build
+        service = gdrive_build("drive", "v3", credentials=creds, static_discovery=True)
+
+        def scan_folder_live(folder_id, folder_path):
+            """
+            Scans one folder and immediately pushes files to scan_jobs.
+            Then recurses into subfolders.
+            """
+            try:
+                # ── Get subfolders ──────────────────────────────────
+                subs = service.files().list(
+                    q=f"'{folder_id}' in parents "
+                      f"and mimeType='application/vnd.google-apps.folder' "
+                      f"and trashed=false",
+                    fields="files(id, name)",
+                    pageSize=500,
+                ).execute().get("files", [])
+
+                # ── Get files in THIS folder ────────────────────────
+                files = service.files().list(
+                    q=f"'{folder_id}' in parents "
+                      f"and trashed=false "
+                      f"and mimeType!='application/vnd.google-apps.folder'",
+                    fields="files(id, name, size, mimeType, modifiedTime, webViewLink)",
+                    pageSize=500,
+                ).execute().get("files", [])
+
+                # ── Push files to scan_jobs IMMEDIATELY ─────────────
+                for f in files:
+                    file_entry = {
+                        "id":             f["id"],
+                        "name":           f["name"],
+                        "folder_name":    folder_path.split("/")[-1],
+                        "full_path":      f"{folder_path}/{f['name']}",
+                        "drive_web_link": f.get("webViewLink", ""),
+                        "size":           f.get("size", 0),
+                        "mimeType":       f.get("mimeType", ""),
+                        "modifiedTime":   f.get("modifiedTime", ""),
+                    }
+                    scan_jobs[job_id]["files"].append(file_entry)
+                    scan_jobs[job_id]["scanned"] += 1
+                    scan_jobs[job_id]["total"]   += 1
+                    scan_jobs[job_id]["current_file"] = f["name"]
+
+                # ── Recurse into subfolders ─────────────────────────
+                for sub in subs:
+                    scan_folder_live(sub["id"], f"{folder_path}/{sub['name']}")
+
+            except Exception as e:
+                logger.error(f"[MY SCAN] Folder error at '{folder_path}': {e}")
+
+        # Start from My Drive root
+        logger.info(f"[MY SCAN] Starting live scan for user: {uid}")
+        scan_folder_live("root", "My Drive")
+
+        scan_jobs[job_id]["status"] = "complete"
+        total = scan_jobs[job_id]["total"]
+        logger.info(f"[MY SCAN] Complete: {total} files for user {uid}")
+
+    except Exception as e:
+        scan_jobs[job_id]["status"] = "failed"
+        logger.error(f"[MY SCAN] Fatal error: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 # ── POST /api/drive/scan ──────────────────────────────────────────────────────
 
 @router.post("/scan")
@@ -97,7 +389,7 @@ async def get_scan_status(job_id: str, current_user=Depends(get_current_user)):
     return scan_jobs[job_id]
 
 
-async def deep_scan_drive(job_id: str):
+def deep_scan_drive(job_id: str):
     try:
         db = get_firestore()
         root_id = settings.NEXORA_DRIVE_FOLDER_ID

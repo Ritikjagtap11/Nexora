@@ -2,10 +2,15 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 
+const hasSingleQuote = process.cwd().includes("'");
+if (hasSingleQuote) {
+  console.warn("[VitePWA Warning] Disabling VitePWA because the current directory path contains a single quote (') character. This avoids service worker generation issues in local environments.");
+}
+
 export default defineConfig({
   plugins: [
     react(),
-    VitePWA({
+    !hasSingleQuote && VitePWA({
       registerType: 'autoUpdate',
       devOptions: {
         enabled: true
@@ -31,7 +36,7 @@ export default defineConfig({
         ]
       }
     })
-  ],
+  ].filter(Boolean),
   server: {
     port: 5173,
     proxy: {

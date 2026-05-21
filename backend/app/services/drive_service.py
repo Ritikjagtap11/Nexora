@@ -19,8 +19,50 @@ UPLOAD_FOLDER_ID = settings.UPLOAD_FOLDER_ID or "1gx4fOiYkAcC800MmjwJTlyK-F1kK1j
 # ──────────────────────────────────────────────
 def get_drive_service():
     """
-    Builds Drive API client using service account credentials.
+    Builds Drive API client using either per-user OAuth credentials from Firestore
+    or falls back to service account credentials.
     """
+    from app.auth.deps import current_user_id_ctx
+    from app.database import get_firestore
+    from google.oauth2.credentials import Credentials
+    from google.auth.transport.requests import Request as GoogleRequest
+
+    uid = current_user_id_ctx.get()
+    if uid:
+        try:
+            db = get_firestore()
+            doc = db.collection("users").document(uid).get()
+            if doc.exists:
+                data = doc.to_dict().get("google_oauth")
+                if data:
+                    creds = Credentials(
+                        token=data["access_token"],
+                        refresh_token=data.get("refresh_token"),
+                        token_uri=data.get("token_uri", "https://oauth2.googleapis.com/token"),
+                        client_id=settings.GOOGLE_CLIENT_ID,
+                        client_secret=settings.GOOGLE_CLIENT_SECRET,
+                        scopes=["https://www.googleapis.com/auth/drive.readonly"] if "readonly" in data.get("token_uri", "") or not data.get("refresh_token") else ["https://www.googleapis.com/auth/drive"],
+                    )
+                    if creds.expired and creds.refresh_token:
+                        try:
+                            creds.refresh(GoogleRequest())
+                            db.collection("users").document(uid).set({
+                                "google_oauth": {
+                                    "access_token": creds.token,
+                                    "refresh_token": creds.refresh_token,
+                                    "token_uri": creds.token_uri,
+                                    "expires_at": creds.expiry.timestamp() if creds.expiry else None,
+                                }
+                            }, merge=True)
+                        except Exception as refresh_err:
+                            logger.error(f"Failed to refresh Google OAuth token: {refresh_err}")
+                    
+                    logger.info(f"🔑 Drive user OAuth active for user: {uid}")
+                    return build('drive', 'v3', credentials=creds, static_discovery=True)
+        except Exception as oauth_err:
+            logger.error(f"Error loading user Google Drive OAuth credentials: {oauth_err}. Falling back to service account.")
+
+    # Fallback to service account
     sa_path = settings.GOOGLE_SERVICE_ACCOUNT_PATH
     if not os.path.exists(sa_path):
         cwd_path = os.path.join(os.getcwd(), sa_path)
@@ -35,7 +77,7 @@ def get_drive_service():
     # Log service account email on startup / call
     logger.info(f"🔑 Drive service account: {credentials.service_account_email}")
     
-    return build('drive', 'v3', credentials=credentials)
+    return build('drive', 'v3', credentials=credentials, static_discovery=True)
 
 # ──────────────────────────────────────────────
 # FUNCTION 2 — Deep scan NEXORA folder (FIXED)

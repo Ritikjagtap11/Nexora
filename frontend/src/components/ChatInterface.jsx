@@ -93,7 +93,7 @@ const UserMessage = ({ content }) => (
     <div className="shrink-0 w-8 h-8 rounded-full bg-primary text-white flex items-center justify-center shadow-sm mt-5">
       <User size={15} />
     </div>
-    <div className="flex flex-col gap-1 items-end max-w-[72%]">
+    <div className="flex flex-col gap-1 items-end max-w-[85%] sm:max-w-[72%]">
       <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500 px-1">You</span>
       <div className="bg-primary text-white rounded-2xl rounded-tr-none px-4 py-3 shadow-sm">
         <p className="text-sm whitespace-pre-wrap">{content}</p>
@@ -134,7 +134,7 @@ const AssistantMessage = ({
       <div className="shrink-0 w-8 h-8 rounded-full bg-white dark:bg-white/10 border border-gray-200 dark:border-white/10 text-primary flex items-center justify-center shadow-sm mt-5">
         <Bot size={15} />
       </div>
-      <div className="flex flex-col gap-1 items-start max-w-[80%]">
+      <div className="flex flex-col gap-1 items-start max-w-[85%] sm:max-w-[80%]">
         <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500 px-1">NEXORA</span>
 
         {isStreaming && !content ? (
@@ -423,12 +423,12 @@ export default function ChatInterface({ sendMessageRef, loadedSession, onNewChat
     <div className="flex-1 flex flex-col h-full w-full overflow-hidden bg-transparent dark:bg-transparent">
 
       {/* Header */}
-      <div className="bg-primary text-white py-3 px-6 shadow-sm z-10 flex items-center justify-between shrink-0">
+      <div className="bg-primary text-white py-3 px-6 shadow-sm z-10 flex flex-wrap gap-2 items-center justify-between shrink-0">
         <div className="flex items-center gap-2 font-bold text-lg">
           <Bot size={20} />
           Chat with Document
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
         <button
           onClick={() => {
             try {

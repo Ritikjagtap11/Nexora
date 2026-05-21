@@ -17,18 +17,18 @@ import { chatAPI } from '../services/api';
 import { useChatContext } from '../context/ChatContext';
 
 const TABS = [
-  { id: 'docs',    label: 'Docs',    Icon: FileText  },
-  { id: 'drive',   label: 'Drive',   Icon: HardDrive },
-  { id: 'history', label: 'History', Icon: History   },
+  { id: 'docs', label: 'Docs', Icon: FileText },
+  { id: 'drive', label: 'Drive', Icon: HardDrive },
+  { id: 'history', label: 'History', Icon: History },
 ];
 
 export default function Sidebar({ className, onSuggestedQuestion, onLoadHistory, onNewChat }) {
   const navigate = useNavigate();
   const { currentSessionId } = useChatContext();
 
-  const [activeTab, setActiveTab]     = useState('docs');
+  const [activeTab, setActiveTab] = useState('docs');
   const [refreshTrigger, setRefreshTrigger] = useState(0);
-  const [llmStatus, setLlmStatus]     = useState(null);
+  const [llmStatus, setLlmStatus] = useState(null);
 
   const handleUploadSuccess = () => setRefreshTrigger(prev => prev + 1);
 
@@ -48,7 +48,7 @@ export default function Sidebar({ className, onSuggestedQuestion, onLoadHistory,
     switch (provider) {
       case 'gemini': return <Sparkles size={14} className="text-blue-500 dark:text-blue-400" />;
       case 'ollama': return <Cpu size={14} className="text-emerald-500 dark:text-emerald-400" />;
-      default:       return <CheckCircle size={14} className="text-gray-500 dark:text-gray-400" />;
+      default: return <CheckCircle size={14} className="text-gray-500 dark:text-gray-400" />;
     }
   };
 
@@ -103,8 +103,8 @@ export default function Sidebar({ className, onSuggestedQuestion, onLoadHistory,
         Drive Explorer
       </button>
 
-      
-      
+
+
 
       {/* ── Upload (only on Docs tab) ────────────────────────────────────── */}
       {activeTab === 'docs' && (

@@ -1,4 +1,3 @@
-from sentence_transformers import SentenceTransformer
 import faiss
 import numpy as np
 import pickle
@@ -8,12 +7,21 @@ from app.config import settings
 
 class EmbeddingService:
     def __init__(self):
-        self.model = SentenceTransformer('all-MiniLM-L6-v2')
+        self._model = None  # Lazy-loaded to prevent slow backend reload times
         self.dimension = 384
         self.index = None
         self.chunks_store = []
         self.metadata_store = []
         self.load_index()
+
+    @property
+    def model(self):
+        if self._model is None:
+            print("[EMBEDDINGS] Lazy-loading SentenceTransformer('all-MiniLM-L6-v2')...")
+            from sentence_transformers import SentenceTransformer
+            self._model = SentenceTransformer('all-MiniLM-L6-v2')
+            print("[EMBEDDINGS] Model loaded successfully.")
+        return self._model
     
     def load_index(self):
         """Load existing FAISS index if available"""

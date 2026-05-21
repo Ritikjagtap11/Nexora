@@ -143,7 +143,7 @@ const DocumentCard = ({ doc, isSelected, onToggle, onDelete, deleting, searchQue
 
   return (
     <div
-      className={`relative group flex flex-col gap-3 rounded-2xl border p-4 transition-all duration-200 cursor-pointer select-none overflow-hidden
+      className={`relative group flex flex-col gap-3 rounded-2xl border p-3 sm:p-4 transition-all duration-200 cursor-pointer select-none overflow-hidden
         ${isSelected
           ? 'border-primary/50 bg-primary/[0.07] shadow-[0_0_0_1px_rgba(233,30,140,0.2),0_4px_16px_rgba(233,30,140,0.08)]'
           : 'border-white/[0.07] bg-white/[0.025] hover:border-primary/25 hover:bg-white/[0.045]'
@@ -176,7 +176,7 @@ const DocumentCard = ({ doc, isSelected, onToggle, onDelete, deleting, searchQue
         </div>
 
         {/* File name */}
-        <p className="flex-1 min-w-0 text-[12.5px] font-semibold text-gray-900 dark:text-white border:border-primary/50 truncate leading-snug" title={name}>
+        <p className="flex-1 min-w-0 text-sm font-semibold text-gray-900 dark:text-white border:border-primary/50 truncate leading-snug" title={name}>
           <HighlightText text={displayName} query={searchQuery} />
         </p>
 
@@ -187,7 +187,7 @@ const DocumentCard = ({ doc, isSelected, onToggle, onDelete, deleting, searchQue
       </div>
 
       {/* ── Row 2: date · separator · size ── */}
-      <div className="flex items-center gap-2 pl-[46px] text-[11px] text-gray-500">
+      <div className="flex items-center gap-2 pl-[46px] text-xs text-gray-500">
         <CalendarDays size={9} className="shrink-0" />
         <span>{formatDate(doc.created_at || doc.uploaded_at || doc.upload_date)}</span>
         <span className="text-gray-700">·</span>
@@ -452,7 +452,7 @@ const [isDeleting, setIsDeleting] = useState(false);
       </div>
 
       {/* Search */}
-      <div className="relative shrink-0 ">
+      <div className="relative shrink-0 w-full">
         <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 b text-gray-500 pointer-events-none" />
         <input
           type="text"
@@ -470,7 +470,7 @@ const [isDeleting, setIsDeleting] = useState(false);
 
       {/* Toolbar */}
       {!loading && filtered.length > 0 && (
-        <div className="flex items-center justify-between gap-2 shrink-0">
+        <div className="flex items-center justify-between gap-2 shrink-0 flex-wrap">
           <button
             onClick={toggleAll}
             className="flex items-center gap-1.5 text-[12px] font-medium text-gray-500 hover:text-white transition-colors"
@@ -514,7 +514,7 @@ const [isDeleting, setIsDeleting] = useState(false);
       <div className="flex-1 overflow-y-auto custom-scrollbar -mx-1 px-1 pb-4">
 
         {loading && (
-          <div className="grid grid-cols-1 sm:grid-cols-2  lg:grid-cols-3 xl:grid-cols-4 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {[...Array(8)].map((_, i) => <SkeletonCard key={i} />)}
           </div>
         )}
@@ -549,7 +549,7 @@ const [isDeleting, setIsDeleting] = useState(false);
         )}
 
         {!loading && !error && filtered.length > 0 && (
-          <div className="grid grid-cols-1 sm:grid-cols-2  lg:grid-cols-3 xl:grid-cols-4 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {filtered.map(doc => (
               <DocumentCard
                 key={doc.id}

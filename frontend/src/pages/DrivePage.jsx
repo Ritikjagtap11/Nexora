@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import SharedNavbar from '../components/SharedNavbar';
 import { useTheme } from '../context/ThemeContext';
 import { useDialog } from '../context/DialogContext';
+import { useAuth } from '../context/AuthContext';
 import driveLogo from "/assets/google-drive.png";
 
 import {
@@ -721,602 +722,744 @@ const FileCard = ({ file, searchQuery, theme }) => {
 
 // ─── DrivePage ────────────────────────────────────────────────────────────────
 export default function DrivePage() {
-  const navigate = useNavigate();
   const { isDarkMode } = useTheme();
-  const { confirm } = useDialog();
   const theme = getTheme(isDarkMode);
+  const t = theme; // alias used in JSX below
+  const { confirm } = useDialog();
+  const navigate = useNavigate();
+  const { token } = useAuth();
 
-  const getToken = async () => {
-    const { getAuth } = await import('firebase/auth')
-    const user = getAuth().currentUser
-    if (user) return await user.getIdToken(true)
-    return localStorage.getItem('nexora_token')
-  }
+  // ── helpers ────────────────────────────────────────────────────────
+  const BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
-  const [sidebarFolders, setSidebarFolders] = useState([]);
-  const [sidebarLoading, setSidebarLoading] = useState(false);
-  const [currentFiles, setCurrentFiles] = useState([]);
-  const [currentFolderName, setCurrentFolderName] = useState('Nexora');
-  const [viewMode, setViewMode] = useState('scan');
-  const [newFolderName, setNewFolderName] = useState('');
-  const [showFolderInput, setShowFolderInput] = useState(false);
-  const [folderCreating, setFolderCreating] = useState(false);
-  const [deletingId, setDeletingId] = useState(null);
+  const authFetch = async (url, opts = {}) => {
+    const activeToken = token || localStorage.getItem('nexora_token');
+    return fetch(`${BASE}${url}`, {
+      ...opts,
+      headers: { Authorization: `Bearer ${activeToken}`, ...(opts.headers || {}) },
+    });
+  };
+
+  // ── OAuth / connection state ────────────────────────────────────────
+  const [driveConnected, setDriveConnected] = useState(null); // null=checking
+  const [connectLoading, setConnectLoading] = useState(false);
+
+  // ── My Drive browser state ──────────────────────────────────────────
+  const [myDriveFolders, setMyDriveFolders] = useState([]);
+  const [myDriveFiles, setMyDriveFiles] = useState([]);
+  const [myDriveLoading, setMyDriveLoading] = useState(false);
+  const [currentFolderId, setCurrentFolderId] = useState('root');
+  const [folderBreadcrumb, setFolderBreadcrumb] = useState([{ id: 'root', name: 'My Drive' }]);
+
+  // ── Scan state ─────────────────────────────────────────────────────
+  const [scannedFiles, setScannedFiles] = useState([]);
+  const [scanStatus, setScanStatus] = useState('idle'); // idle|running|complete|failed
+  const [scanProgress, setScanProgress] = useState({ scanned: 0, total: 0, current_file: '' });
+  const [scanJobId, setScanJobId] = useState(null);
+
+  // ── Other UI state ─────────────────────────────────────────────────
   const [searchQuery, setSearchQuery] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
   const [hoveredFolder, setHoveredFolder] = useState(null);
-  const [scannedFiles, setScannedFiles] = useState([]);
-  const [scanStatus, setScanStatus] = useState('idle');
-  const [scanProgress, setScanProgress] = useState({ scanned: 0, total: 0, current_file: '' });
+  const [viewMode, setViewMode] = useState('myDrive'); // myDrive | scan
 
   const pollRef = useRef(null);
-  const hasScanRun = useRef(false);
-  const foldersLoadedRef = useRef(false);
 
+  // ── On mount: check connection status ──────────────────────────────
   useEffect(() => {
-    try {
-      const cached = sessionStorage.getItem('nexora_scan_files');
-      const cachedStatus = sessionStorage.getItem('nexora_scan_status');
-      if (cached && cachedStatus === 'complete') {
-        const files = JSON.parse(cached);
-        if (files.length > 0) { setScannedFiles(files); setScanStatus('complete'); hasScanRun.current = true; }
+    let ignore = false;
+
+    const init = async () => {
+      try {
+        // Check if just returned from OAuth
+        const params = new URLSearchParams(window.location.search);
+        const justConnected = params.get('connected') === 'true';
+        if (justConnected) window.history.replaceState({}, '', window.location.pathname);
+
+        const res = await authFetch('/api/drive/status');
+        if (ignore) return;
+        const data = await res.json();
+        const connected = data.connected || justConnected;
+        setDriveConnected(connected);
+
+        if (connected) {
+          loadMyDrive('root');
+          restoreScanFromSession();
+        }
+      } catch {
+        if (!ignore) {
+          setDriveConnected(false);
+        }
       }
-    } catch (e) { }
-    if (!foldersLoadedRef.current) { foldersLoadedRef.current = true; loadSidebarFolders(); }
-    if (!hasScanRun.current) { hasScanRun.current = true; scanFiles(); }
-    return () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } };
+    };
+    init();
+
+    return () => {
+      ignore = true;
+      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    };
   }, []);
 
-  const loadSidebarFolders = async () => {
+  // ── Restore scan results from sessionStorage on navigation ─────────
+  const restoreScanFromSession = () => {
     try {
-      setSidebarLoading(true);
-      const freshToken = await getToken()
-      const res = await fetch('http://localhost:8000/api/drive/folders', { headers: { Authorization: `Bearer ${freshToken}` } });
+      const cached = sessionStorage.getItem('nexora_my_scan_files');
+      const cachedStatus = sessionStorage.getItem('nexora_my_scan_status');
+      if (cached && cachedStatus === 'complete') {
+        const files = JSON.parse(cached);
+        if (files.length > 0) {
+          setScannedFiles(files);
+          setScanStatus('complete');
+        }
+      }
+    } catch (e) { }
+  };
+
+  // ── Load My Drive folders+files for a given folder ──────────────────
+  const loadMyDrive = async (folderId = 'root', folderName = 'My Drive') => {
+    setMyDriveLoading(true);
+    try {
+      const res = await authFetch(`/api/drive/my-drive?folder_id=${folderId}`);
+      if (!res.ok) throw new Error('Failed');
       const data = await res.json();
-      const folders = data.folders || data || [];
-      setSidebarFolders(Array.isArray(folders) ? folders : []);
-    } catch (err) { console.error('Sidebar folders error:', err); }
-    finally { setSidebarLoading(false); }
+      setMyDriveFolders(data.folders || []);
+      setMyDriveFiles(data.files || []);
+      setCurrentFolderId(folderId);
+    } catch (err) {
+      console.error('My Drive load error:', err);
+    } finally {
+      setMyDriveLoading(false);
+    }
   };
 
-  const handleRefreshFolders = () => {
-    foldersLoadedRef.current = false; loadSidebarFolders(); foldersLoadedRef.current = true;
-  };
-
-  const scanFiles = async () => {
+  // ── OAuth connect ──────────────────────────────────────────────────
+  const handleConnectDrive = async () => {
+    setConnectLoading(true);
     try {
-      setScanStatus('running');
-      const freshToken = await getToken()
-      const response = await fetch('http://localhost:8000/api/drive/scan', {
-        method: 'POST', headers: { Authorization: `Bearer ${freshToken}`, 'Content-Type': 'application/json' },
-      });
-      if (!response.ok) throw new Error(`Scan failed: ${response.status}`);
-      const { job_id } = await response.json();
-      if (!job_id) throw new Error('No job_id received');
+      const res = await authFetch('/api/drive/oauth/auth-url');
+      const data = await res.json();
+      window.location.href = data.auth_url;
+    } catch {
+      setConnectLoading(false);
+    }
+  };
 
-      const interval = setInterval(async () => {
+  // ── OAuth disconnect ───────────────────────────────────────────────
+  const handleDisconnectDrive = async () => {
+    const ok = await confirm('Disconnect your Google Drive from NEXORA?');
+    if (!ok) return;
+    try {
+      await authFetch('/api/drive/disconnect', { method: 'DELETE' });
+      setDriveConnected(false);
+      setMyDriveFolders([]);
+      setMyDriveFiles([]);
+      setScannedFiles([]);
+      setScanStatus('idle');
+      setFolderBreadcrumb([{ id: 'root', name: 'My Drive' }]);
+      sessionStorage.removeItem('nexora_my_scan_files');
+      sessionStorage.removeItem('nexora_my_scan_status');
+    } catch (err) {
+      console.error('Disconnect error:', err);
+    }
+  };
+
+  // ── Folder navigation (My Drive browser) ──────────────────────────
+  const handleFolderClick = (folder) => {
+    setFolderBreadcrumb(prev => [...prev, { id: folder.id, name: folder.name }]);
+    loadMyDrive(folder.id, folder.name);
+    setViewMode('myDrive');
+  };
+
+  const handleBreadcrumbClick = (crumb, index) => {
+    setFolderBreadcrumb(prev => prev.slice(0, index + 1));
+    loadMyDrive(crumb.id, crumb.name);
+    setViewMode('myDrive');
+  };
+
+  // ── Deep Scan (user's own drive) ───────────────────────────────────
+  const handleDeepScan = async () => {
+    if (scanStatus === 'running') return;
+    setScanStatus('running');
+    setScanProgress({ scanned: 0, total: 0, current_file: '' });
+    setScannedFiles([]);
+    setViewMode('scan');
+
+    try {
+      const res = await authFetch('/api/drive/my-scan', { method: 'POST' });
+      if (!res.ok) throw new Error('Scan start failed');
+      const { job_id } = await res.json();
+      setScanJobId(job_id);
+
+      // Poll every 1.5s — show files as they come in (before scan completes)
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = setInterval(async () => {
         try {
-          const loopToken = await getToken()
-          const statusRes = await fetch(`http://localhost:8000/api/drive/scan/${job_id}`, { headers: { Authorization: `Bearer ${loopToken}` } });
-          const status = await statusRes.json();
-          setScanProgress(status);
-          if (status.files?.length > 0) setScannedFiles(status.files);
-          if (status.status === 'complete' || status.status === 'failed') {
-            clearInterval(interval);
-            setScanStatus(status.status);
-            setScannedFiles(status.files || []);
-            if (status.status === 'complete') {
-              try { sessionStorage.setItem('nexora_scan_files', JSON.stringify(status.files || [])); sessionStorage.setItem('nexora_scan_status', 'complete'); } catch (e) { }
+          const sr = await authFetch(`/api/drive/scan/${job_id}`);
+          const data = await sr.json();
+
+          setScanProgress({
+            scanned: data.scanned || 0,
+            total: data.total || 0,
+            current_file: data.current_file || '',
+          });
+
+          // Show files immediately as they arrive — don't wait for completion
+          if (data.files?.length > 0) setScannedFiles([...data.files]);
+
+          if (data.status === 'complete' || data.status === 'failed') {
+            clearInterval(pollRef.current);
+            pollRef.current = null;
+            setScanStatus(data.status);
+            setScannedFiles(data.files || []);
+
+            if (data.status === 'complete') {
+              try {
+                sessionStorage.setItem('nexora_my_scan_files', JSON.stringify(data.files || []));
+                sessionStorage.setItem('nexora_my_scan_status', 'complete');
+              } catch (e) { }
             }
           }
-        } catch (e) { clearInterval(interval); setScanStatus('failed'); }
-      }, 2000);
-    } catch (e) { setScanStatus('failed'); }
+        } catch (e) {
+          clearInterval(pollRef.current);
+          pollRef.current = null;
+          setScanStatus('failed');
+        }
+      }, 1500);
+
+    } catch (e) {
+      setScanStatus('failed');
+    }
   };
 
-  const handleFolderClick = async (folder) => {
-    try {
-      setScanStatus('idle');
-      const freshToken = await getToken()
-      const res = await fetch(`http://localhost:8000/api/drive/folders/${folder.id}/contents`, { headers: { Authorization: `Bearer ${freshToken}` } });
-      const data = await res.json();
-      setCurrentFiles(data.files || []);
-      setCurrentFolderName(folder.name);
-      setViewMode('folder');
-    } catch (err) { console.error('Folder contents error:', err); }
+  // ── Search filter ──────────────────────────────────────────────────
+  const flashSuccess = (msg) => {
+    setSuccessMessage(msg);
+    setTimeout(() => setSuccessMessage(''), 3000);
   };
 
-  const handleBackToRoot = () => { setViewMode('scan'); setCurrentFolderName('Nexora'); };
-
-  const handleCreateFolder = async () => {
-    const name = newFolderName.trim();
-    if (!name) return;
-    setFolderCreating(true); // ← ADD
-    try {
-      const freshToken = await getToken()
-      const res = await fetch('http://localhost:8000/api/drive/folders', {
-        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${freshToken}` },
-        body: JSON.stringify({ name }),
-      });
-      if (res.ok) { setNewFolderName(''); setShowFolderInput(false); await loadSidebarFolders(); flashSuccess(`Folder "${name}" created`); }
-    } catch (err) { console.error('Create folder error:', err); }
-    finally { setFolderCreating(false); } // ← ADD
-  };
-
-  const handleDelete = async (itemId, itemName) => {
-    const ok = await confirm(`Permanently delete "${itemName}" from Drive?`);
-    if (!ok) return;
-    setDeletingId(itemId); // ← ADD
-    try {
-      const freshToken = await getToken()
-      const res = await fetch(`http://localhost:8000/api/drive/items/${itemId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${freshToken}` } });
-      if (res.ok) {
-        setSidebarFolders(p => p.filter(f => f.id !== itemId));
-        setScannedFiles(p => p.filter(f => f.id !== itemId));
-        setCurrentFiles(p => p.filter(f => f.id !== itemId));
-        flashSuccess(`"${itemName}" deleted`);
-      }
-    } catch (err) { console.error('Delete error:', err); }
-    finally { setDeletingId(null); } // ← ADD
-  };
-
-  const flashSuccess = (msg) => { setSuccessMessage(msg); setTimeout(() => setSuccessMessage(''), 3000); };
-
-  const displayFiles = (viewMode === 'scan' ? scannedFiles : currentFiles).filter(f =>
+  const displayFiles = (viewMode === 'scan' ? scannedFiles : myDriveFiles).filter(f =>
     !searchQuery ||
     f.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
     (f.full_path || f.folderPath || '').toLowerCase().includes(searchQuery.toLowerCase())
   );
 
+  // ── RENDER ─────────────────────────────────────────────────────────
   return (
     <div
       className="app-background flex flex-col h-screen"
-      style={{ fontFamily: '"Inter",sans-serif', color: theme.textPrimary, transition: 'color 0.2s' }}
+      style={{ fontFamily: '"Inter",sans-serif', color: t.textPrimary, transition: 'color 0.2s' }}
     >
       <SharedNavbar />
 
+      {/* Keep all existing keyframes + scrollbar styles */}
       <style>{`
         @keyframes spin          { to { transform: rotate(360deg); } }
         @keyframes fadeUp        { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:translateY(0); } }
         @keyframes indeterminate { 0% { transform:translateX(-100%); width:35%; } 100% { transform:translateX(320%); width:35%; } }
-
         .drive-sb::-webkit-scrollbar        { width:4px; }
         .drive-sb::-webkit-scrollbar-track  { background:transparent; }
         .drive-sb::-webkit-scrollbar-thumb  { background:rgba(249,95,158,0.28); border-radius:99px; }
-
-        .drive-search:focus {
-          outline: none;
-          border-color: #F95F9E !important;
-          box-shadow: 0 0 0 3px rgba(249,95,158,0.14);
-        }
-        .drive-search::placeholder,
-        .drive-folder-input::placeholder { color:#94A3B8; }
-
-        .scan-btn:not(:disabled):hover {
-          transform: translateY(-1px);
-          box-shadow: 0 6px 22px rgba(249,95,158,0.42) !important;
-        }
-        .file-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fill, minmax(260px,1fr));
-          gap: 16px;
-          padding: 20px;
-          animation: fadeUp .22s ease both;
-        }
-        .sb-folder-row:hover .sb-delete-btn { opacity: 1 !important; }
+        .drive-search:focus { outline:none; border-color:#F95F9E !important; box-shadow:0 0 0 3px rgba(249,95,158,0.14); }
+        .drive-search::placeholder, .drive-folder-input::placeholder { color:#94A3B8; }
+        .scan-btn:not(:disabled):hover { transform:translateY(-1px); box-shadow:0 6px 22px rgba(249,95,158,0.42) !important; }
+        .file-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:16px; padding:20px; animation:fadeUp .22s ease both; }
+        .sb-folder-row:hover .sb-delete-btn { opacity:1 !important; }
       `}</style>
 
-      <div className="flex flex-1 overflow-hidden" style={{ paddingTop: '88px' }}>
-
-        {/* ── SIDEBAR ─────────────────────────────────────────────────── */}
-        <aside style={{
-          width: '252px', flexShrink: 0,
-          borderRight: `1px solid ${theme.border}`,
-          height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden',
-          background: theme.bgSidebar,
-          backdropFilter: 'blur(20px)',
-          transition: 'background 0.2s, border-color 0.2s',
+      {/* ── CHECKING STATE ───────────────────────────────────────────── */}
+      {driveConnected === null && (
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          height: '100vh', flexDirection: 'column', gap: '14px',
         }}>
-
-          {/* Header */}
           <div style={{
-            padding: '15px 16px', borderBottom: `1px solid ${theme.border}`,
-            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            width: '36px', height: '36px', borderRadius: '50%',
+            border: '3px solid rgba(249,95,158,0.18)',
+            borderTop: '3px solid #F95F9E',
+            animation: 'spin 0.8s linear infinite',
+          }} />
+          <span style={{ color: t.textSecondary, fontSize: '14px' }}>
+            Checking Drive connection…
+          </span>
+        </div>
+      )}
+
+      {/* ── NOT CONNECTED — Full screen connect card ──────────────────── */}
+      {driveConnected === false && (
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          flex: 1, padding: '24px', paddingTop: '108px',
+        }}>
+          <div style={{
+            background: isDarkMode ? '#1E293B' : '#FFFFFF',
+            border: '1.5px solid rgba(249,95,158,0.22)',
+            borderRadius: '24px', padding: '48px 40px',
+            maxWidth: '460px', width: '100%', textAlign: 'center',
+            boxShadow: '0 8px 48px rgba(249,95,158,0.10)',
+            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '20px',
           }}>
-            <span style={{
-              fontWeight: 700, fontSize: '13px', letterSpacing: '0.05em', color: '#F95F9E',
-              display: 'flex', alignItems: 'center', gap: '7px',
-            }}>
-              <FolderIcon size={14} /> NEXORA DRIVE
-            </span>
-            <div style={{ display: 'flex', gap: '2px' }}>
-              <button onClick={handleRefreshFolders} title="Refresh" style={{
-                background: 'none', border: 'none', cursor: 'pointer', padding: '6px', borderRadius: '8px',
-                color: theme.textSecondary, transition: 'all .15s',
-                animation: sidebarLoading ? 'spin 1s linear infinite' : 'none',
-              }}><RotateCw size={13} /></button>
-              <button onClick={() => setShowFolderInput(v => !v)} title="New folder" style={{
-                background: showFolderInput ? 'rgba(249,95,158,0.14)' : 'none',
-                border: 'none', cursor: 'pointer', padding: '6px', borderRadius: '8px',
-                color: showFolderInput ? '#F95F9E' : theme.textSecondary, transition: 'all .15s',
-              }}><Plus size={13} /></button>
+            <img src="/assets/google-drive.png" alt="Google Drive"
+              style={{ width: '64px', height: '64px' }} />
+            <div>
+              <div style={{
+                fontSize: '22px', fontWeight: 700,
+                color: isDarkMode ? '#F1F5F9' : '#0F172A', marginBottom: '8px',
+              }}>
+                Connect Your Google Drive
+              </div>
+              <div style={{ fontSize: '14px', color: t.textSecondary, lineHeight: '1.6' }}>
+                Link your personal Google Drive to browse all your files and folders,
+                and chat with any document using AI.
+              </div>
             </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', width: '100%', textAlign: 'left' }}>
+              {[
+                '📁 Browse your full My Drive — all files & folders',
+                '🔍 Deep scan & search across everything',
+                '🤖 Chat with any document using AI',
+                '🔒 Only you can see your own files',
+              ].map((item, i) => (
+                <div key={i} style={{
+                  fontSize: '13px', color: t.textSecondary,
+                  background: isDarkMode ? 'rgba(255,255,255,0.04)' : 'rgba(249,95,158,0.04)',
+                  borderRadius: '10px', padding: '10px 14px',
+                }}>
+                  {item}
+                </div>
+              ))}
+            </div>
+            <button
+              onClick={handleConnectDrive}
+              disabled={connectLoading}
+              style={{
+                background: 'linear-gradient(135deg,#F95F9E,#FC9CBF)',
+                color: '#fff', border: 'none', borderRadius: '14px',
+                padding: '14px 0', fontSize: '15px', fontWeight: 700,
+                cursor: connectLoading ? 'not-allowed' : 'pointer',
+                opacity: connectLoading ? 0.75 : 1,
+                boxShadow: '0 4px 20px rgba(249,95,158,0.32)',
+                width: '100%', transition: 'opacity 0.2s',
+              }}
+            >
+              {connectLoading ? 'Redirecting to Google…' : '🔗 Connect Google Drive'}
+            </button>
           </div>
+        </div>
+      )}
 
-          {/* New folder input */}
-          {showFolderInput && (
+      {/* ── CONNECTED — Main Drive UI ─────────────────────────────────── */}
+      {driveConnected === true && (
+        <div className="flex flex-1 overflow-hidden" style={{ paddingTop: '88px' }}>
+
+          {/* ── SIDEBAR ──────────────────────────────────────────────── */}
+          <aside style={{
+            width: '252px', flexShrink: 0,
+            borderRight: `1px solid ${t.border}`,
+            height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden',
+            background: t.bgSidebar, backdropFilter: 'blur(20px)',
+            transition: 'background 0.2s, border-color 0.2s',
+          }}>
+            {/* Header */}
             <div style={{
-              padding: '10px 12px', borderBottom: `1px solid ${theme.border}`,
-              display: 'flex', gap: '6px', animation: 'fadeUp .2s ease both',
+              padding: '15px 16px', borderBottom: `1px solid ${t.border}`,
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
             }}>
-
-              <input
-                value={newFolderName} autoFocus
-                onChange={e => setNewFolderName(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && handleCreateFolder()}
-                placeholder="Folder name…"
-                disabled={folderCreating}
-                className="drive-folder-input"
-                style={{
-                  flex: 1, padding: '7px 10px', fontSize: '12px',
-                  background: theme.bgInput,
-                  border: `1.5px solid ${theme.border}`,
-                  borderRadius: '9px', color: theme.textPrimary,
-                  outline: 'none', transition: 'border .15s',
-                  opacity: folderCreating ? 0.5 : 1,   /* ← ADD */
-                  cursor: folderCreating ? 'not-allowed' : 'text',  /* ← ADD */
-                }}
-              />
+              <span style={{
+                fontWeight: 700, fontSize: '13px', letterSpacing: '0.05em', color: '#F95F9E',
+                display: 'flex', alignItems: 'center', gap: '7px',
+              }}>
+                <FolderIcon size={14} /> MY DRIVE
+              </span>
               <button
-                onClick={handleCreateFolder}
-                disabled={folderCreating}
+                onClick={() => loadMyDrive(currentFolderId)}
+                title="Refresh"
                 style={{
-                  padding: '7px 14px',
-                  background: folderCreating
-                    ? (isDarkMode ? 'rgba(255,255,255,0.06)' : '#F1F5F9')
-                    : 'linear-gradient(135deg,#F95F9E,#FC9CBF)',
-                  color: folderCreating ? theme.textSecondary : 'white',
-                  border: 'none', borderRadius: '9px',
-                  fontSize: '12px', fontWeight: 600,
-                  cursor: folderCreating ? 'not-allowed' : 'pointer',
-                  boxShadow: folderCreating ? 'none' : '0 2px 8px rgba(249,95,158,0.30)',
-                  display: 'flex', alignItems: 'center', gap: '6px',
-                  transition: 'all 0.2s',
-                  minWidth: '58px', justifyContent: 'center',
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  padding: '6px', borderRadius: '8px',
+                  color: t.textSecondary,
+                  animation: myDriveLoading ? 'spin 1s linear infinite' : 'none',
                 }}
               >
-                {folderCreating ? (
-                  <>
-                    <span style={{
-                      width: '11px', height: '11px', flexShrink: 0,
-                      border: `2px solid ${isDarkMode ? 'rgba(249,95,158,0.18)' : 'rgba(249,95,158,0.20)'}`,
-                      borderTop: '2px solid #F95F9E',
-                      borderRadius: '50%',
-                      animation: 'spin 0.9s linear infinite',
-                      display: 'inline-block',
-                    }} />
-                    Adding
-                  </>
-                ) : 'Add'}
+                <RotateCw size={13} />
               </button>
             </div>
-          )}
 
-          {/* Folders label */}
-          <div style={{
-            padding: '12px 16px 4px', fontSize: '10px', fontWeight: 600,
-            color: theme.textMuted, textTransform: 'uppercase', letterSpacing: '0.09em',
-          }}>Folders</div>
+            {/* Sidebar folder label */}
+            <div style={{
+              padding: '12px 16px 4px', fontSize: '10px', fontWeight: 600,
+              color: t.textMuted, textTransform: 'uppercase', letterSpacing: '0.09em',
+            }}>
+              Folders
+            </div>
 
-          {/* Folder list */}
-          <div style={{ flex: 1, overflowY: 'auto' }} className="drive-sb">
-            {sidebarFolders.length === 0 && !sidebarLoading && (
-              <div style={{ padding: '28px 16px', textAlign: 'center', fontSize: '12px', color: theme.textSecondary, lineHeight: 1.6 }}>
-                <div style={{ fontSize: '28px', marginBottom: '8px' }}>📂</div>
-                No folders found.<br />Share NEXORA with service account.
-              </div>
-            )}
+            {/* Sidebar folder list — shows user's actual My Drive folders */}
+            <div style={{ flex: 1, overflowY: 'auto' }} className="drive-sb">
+              {myDriveLoading && myDriveFolders.length === 0 && (
+                <div style={{ padding: '28px 16px', textAlign: 'center', fontSize: '12px', color: t.textSecondary }}>
+                  <div style={{
+                    width: '20px', height: '20px', borderRadius: '50%', margin: '0 auto 8px',
+                    border: '2px solid rgba(249,95,158,0.2)', borderTop: '2px solid #F95F9E',
+                    animation: 'spin 0.8s linear infinite',
+                  }} />
+                  Loading folders…
+                </div>
+              )}
 
-            {sidebarFolders.map(folder => {
-              const active = currentFolderName === folder.name;
-              const isHov = hoveredFolder === folder.id;
-              const iconInfo = getSidebarIconInfo(folder.name);
+              {!myDriveLoading && myDriveFolders.length === 0 && (
+                <div style={{ padding: '28px 16px', textAlign: 'center', fontSize: '12px', color: t.textSecondary, lineHeight: 1.6 }}>
+                  <div style={{ fontSize: '28px', marginBottom: '8px' }}>📂</div>
+                  No folders in My Drive root.
+                </div>
+              )}
 
-              return (
-                <div
-                  key={folder.id}
-                  className="sb-folder-row"
-                  onMouseEnter={() => setHoveredFolder(folder.id)}
-                  onMouseLeave={() => setHoveredFolder(null)}
-                  style={{
-                    display: 'flex', alignItems: 'center', padding: '8px 12px 8px 10px',
-                    cursor: 'pointer',
-                    borderLeft: active ? `3px solid ${iconInfo.color}` : '3px solid transparent',
-                    background: active
-                      ? `${iconInfo.color}0e`
-                      : isHov ? theme.folderHov : 'transparent',
-                    opacity: deletingId === folder.id ? 0.45 : 1,
-                    transition: 'all .15s, opacity .2s',
-                    pointerEvents: deletingId === folder.id ? 'none' : 'auto',
-                    transition: 'all .15s',
-                    position: 'relative',
-                  }}
-                >
-                  <span
-                    style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '9px', overflow: 'hidden' }}
+              {myDriveFolders.map(folder => {
+                const active = currentFolderId === folder.id;
+                const isHov = hoveredFolder === folder.id;
+                const iconInfo = getSidebarIconInfo(folder.name);
+                return (
+                  <div
+                    key={folder.id}
+                    className="sb-folder-row"
+                    onMouseEnter={() => setHoveredFolder(folder.id)}
+                    onMouseLeave={() => setHoveredFolder(null)}
                     onClick={() => handleFolderClick(folder)}
-                  >
-                    {/* Format-specific icon box */}
-                    <span style={{
-                      width: '32px', height: '32px', borderRadius: '9px', flexShrink: 0,
-                      background: active ? iconInfo.bg : isHov ? iconInfo.bg : theme.bgSecondary,
-                      border: `1.5px solid ${active ? iconInfo.color + '40' : isHov ? iconInfo.color + '30' : theme.border}`,
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      transition: 'all .15s',
-                    }}>
-                      <SidebarFolderIcon
-                        iconType={iconInfo.icon}
-                        color={active || isHov ? iconInfo.color : theme.textMuted}
-                        size={17}
-                      />
-                    </span>
-
-                    <span style={{
-                      fontSize: '13px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                      fontWeight: active ? 600 : 400,
-                      color: active ? iconInfo.color : theme.textPrimary,
-                      transition: 'color .15s',
-                      flex: 1,
-                    }}>
-                      {folder.name}
-                    </span>
-
-                    {folder.file_count !== undefined && (
-                      <span style={{
-                        fontSize: '10px', flexShrink: 0,
-                        color: active ? iconInfo.color : theme.textSecondary,
-                        background: active ? `${iconInfo.color}14` : theme.bgSecondary,
-                        padding: '1px 7px', borderRadius: '99px',
-                        fontWeight: 500,
-                        transition: 'all .15s',
-                      }}>{folder.file_count}</span>
-                    )}
-                  </span>
-
-                  <button
-                    className="sb-delete-btn"
-                    onClick={e => { e.stopPropagation(); handleDelete(folder.id, folder.name); }}
-                    disabled={deletingId === folder.id}
                     style={{
-                      background: 'none', border: 'none',
-                      cursor: deletingId === folder.id ? 'not-allowed' : 'pointer',
-                      padding: '3px 4px',
-                      color: '#ef4444',
-                      opacity: deletingId === folder.id ? 1 : 0, // stays visible while deleting
-                      transition: 'opacity .15s',
-                      flexShrink: 0,
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      width: '20px', height: '20px',
+                      display: 'flex', alignItems: 'center', padding: '8px 12px 8px 10px',
+                      cursor: 'pointer',
+                      borderLeft: active ? `3px solid ${iconInfo.color}` : '3px solid transparent',
+                      background: active
+                        ? `${iconInfo.color}0e`
+                        : isHov ? t.folderHov : 'transparent',
+                      transition: 'all .15s',
                     }}
                   >
-                    {deletingId === folder.id ? (
+                    <span style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '9px', overflow: 'hidden' }}>
                       <span style={{
-                        width: '11px', height: '11px',
-                        border: '2px solid rgba(239,68,68,0.20)',
-                        borderTop: '2px solid #ef4444',
-                        borderRadius: '50%',
-                        animation: 'spin 0.9s linear infinite',
-                        display: 'inline-block',
-                        flexShrink: 0,
-                      }} />
-                    ) : (
-                      <Trash2 size={13} />
-                    )}
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Deep Scan All */}
-          <div style={{ padding: '14px', borderTop: `1px solid ${theme.border}`, flexShrink: 0 }}>
-            <button
-              className="scan-btn"
-              onClick={scanFiles}
-              disabled={scanStatus === 'running'}
-              style={{
-                width: '100%', padding: '11px',
-                background: scanStatus === 'running' ? theme.scanDisabled : 'linear-gradient(135deg,#F95F9E 0%,#FC9CBF 100%)',
-                color: scanStatus === 'running' ? theme.textSecondary : 'white',
-                border: 'none', borderRadius: '12px', fontSize: '13px', fontWeight: 600,
-                cursor: scanStatus === 'running' ? 'not-allowed' : 'pointer',
-                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '7px',
-                boxShadow: scanStatus === 'running' ? 'none' : '0 4px 14px rgba(249,95,158,0.35)',
-                transition: 'all .2s',
-              }}
-            >
-              {scanStatus === 'running' ? (
-                <>
-                  <span style={{
-                    width: '14px', height: '14px', flexShrink: 0,
-                    border: `2px solid ${isDarkMode ? 'rgba(249,95,158,0.18)' : 'rgba(249,95,158,0.2)'}`,
-                    borderTop: '2px solid #F95F9E',
-                    borderRadius: '50%', animation: 'spin 0.9s linear infinite',
-                  }} />
-                  Scanning…
-                </>
-              ) : (
-                <><ScanLine size={14} /> Deep Scan All</>
-              )}
-            </button>
-          </div>
-        </aside>
-
-        {/* ── MAIN PANEL ──────────────────────────────────────────────── */}
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-
-          {/* Top bar */}
-          <div style={{
-            padding: '10px 20px', borderBottom: `1px solid ${theme.border}`,
-            background: theme.bgTopbar, backdropFilter: 'blur(18px)',
-            display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px',
-            position: 'sticky', top: 0, zIndex: 20, transition: 'background 0.2s, border-color 0.2s',
-          }}>
-            {/* Breadcrumb */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', fontWeight: 500, flexShrink: 0 }}>
-              <Home size={15} onClick={handleBackToRoot}
-                style={{ cursor: 'pointer', color: theme.textSecondary }} />
-              <ChevronRight size={13} style={{ color: theme.textMuted }} />
-              <span onClick={handleBackToRoot} style={{
-                cursor: 'pointer', transition: 'color .15s',
-                color: viewMode === 'scan' ? '#F95F9E' : theme.textSecondary,
-                fontWeight: viewMode === 'scan' ? 700 : 500,
-              }}>NEXORA</span>
-              {viewMode === 'folder' && (
-                <>
-                  <ChevronRight size={13} style={{ color: theme.textMuted }} />
-                  <span style={{ color: '#F95F9E', fontWeight: 700 }}>{currentFolderName}</span>
-                </>
-              )}
-            </div>
-
-            {/* Search bar */}
-            <div style={{ position: 'relative', width: '320px' }}>
-              <Search size={14} style={{
-                position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)',
-                color: searchQuery ? '#F95F9E' : theme.textMuted,
-                transition: 'color .15s', pointerEvents: 'none',
-              }} />
-              <input
-                type="text" placeholder="Search files…"
-                value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
-                className="drive-search"
-                style={{
-                  width: '100%', paddingLeft: '36px', paddingRight: '14px',
-                  paddingTop: '9px', paddingBottom: '9px',
-                  background: theme.bgInput,
-                  border: `1.5px solid ${theme.border}`,
-                  borderRadius: '12px', fontSize: '13px',
-                  color: theme.textPrimary, boxSizing: 'border-box',
-                  transition: 'all .15s',
-                }}
-              />
-            </div>
-
-            {/* Google Drive Access Button */}
-            <button
-              onClick={() =>
-                window.open('https://drive.google.com/drive/folders/1Rk79CKFOtQcSlndD2fMgsjo-KI431lx6', '_blank')
-              }
-              className="upload-label"
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '8px',
-                padding: '9px 18px',
-                background: 'linear-gradient(135deg, #F95F9E, #FC9CBF)',
-                color: 'white',
-                borderRadius: '12px',
-                fontSize: '13px',
-                fontWeight: 600,
-                cursor: 'pointer',
-                whiteSpace: 'nowrap',
-                boxShadow: '0 3px 12px rgba(249,95,158,0.30)',
-                transition: 'all .2s',
-                flexShrink: 0,
-                border: 'none',
-                outline: 'none',
-              }}
-            >
-              <img
-                src={driveLogo}
-                alt="Google Drive"
-                style={{ width: '20px', height: '20px', objectFit: 'contain', flexShrink: 0 }}
-              />
-              Google Drive Access
-            </button>
-          </div>
-
-          {/* Success toast */}
-          {successMessage && (
-            <div style={{
-              position: 'fixed', bottom: '32px', left: '50%', transform: 'translateX(-50%)',
-              zIndex: 50, background: 'linear-gradient(135deg,#22c55e,#16a34a)',
-              color: 'white', padding: '12px 24px', borderRadius: '99px',
-              display: 'flex', alignItems: 'center', gap: '10px',
-              fontWeight: 600, fontSize: '14px',
-              boxShadow: '0 8px 32px rgba(34,197,94,0.3)',
-              animation: 'fadeUp .25s ease both',
-            }}>
-              <CheckCircle size={16} strokeWidth={3} /> {successMessage}
-            </div>
-          )}
-
-          {/* Content */}
-          <div style={{ flex: 1, overflowY: 'auto' }} className="drive-sb">
-
-            {/* Scanning progress */}
-            {scanStatus === 'running' && (
-              <div style={{ padding: '28px 24px 16px', animation: 'fadeUp .2s ease both' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '14px' }}>
-                  <span style={{
-                    width: '22px', height: '22px', flexShrink: 0,
-                    border: `2.5px solid ${isDarkMode ? 'rgba(249,95,158,0.14)' : 'rgba(249,95,158,0.18)'}`,
-                    borderTop: '2.5px solid #F95F9E',
-                    borderRadius: '50%', animation: 'spin 0.9s linear infinite',
-                  }} />
-                  <div>
-                    <p style={{ fontSize: '14px', fontWeight: 600, color: theme.textPrimary, margin: 0 }}>
-                      Scanning NEXORA Drive…
-                    </p>
-                    {scanProgress.total > 0 && (
-                      <p style={{ fontSize: '12px', color: '#F95F9E', margin: '3px 0 0', fontWeight: 500 }}>
-                        {scanProgress.scanned} of {scanProgress.total} files
-                      </p>
-                    )}
-                    {scanProgress.current_file && (
-                      <p style={{
-                        fontSize: '11px', color: theme.textSecondary,
-                        margin: '2px 0 0', maxWidth: '420px',
-                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                        width: '32px', height: '32px', borderRadius: '9px', flexShrink: 0,
+                        background: active ? iconInfo.bg : isHov ? iconInfo.bg : t.bgSecondary,
+                        border: `1.5px solid ${active ? iconInfo.color + '40' : isHov ? iconInfo.color + '30' : t.border}`,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        transition: 'all .15s',
                       }}>
-                        {scanProgress.current_file}
-                      </p>
-                    )}
+                        <SidebarFolderIcon
+                          iconType={iconInfo.icon}
+                          color={active || isHov ? iconInfo.color : t.textMuted}
+                          size={17}
+                        />
+                      </span>
+                      <span style={{
+                        fontSize: '13px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                        fontWeight: active ? 600 : 400,
+                        color: active ? iconInfo.color : t.textPrimary,
+                        transition: 'color .15s', flex: 1,
+                      }}>
+                        {folder.name}
+                      </span>
+                    </span>
                   </div>
-                </div>
-                {/* Progress bar */}
-                <div style={{ height: '5px', background: theme.scanBarBg, borderRadius: '99px', overflow: 'hidden', maxWidth: '500px' }}>
-                  <div style={{
-                    height: '100%',
-                    width: scanProgress.total > 0 ? `${(scanProgress.scanned / scanProgress.total) * 100}%` : '30%',
-                    background: 'linear-gradient(90deg,#F95F9E,#FC9CBF)',
-                    borderRadius: '99px', transition: 'width .4s ease',
-                    animation: scanProgress.total === 0 ? 'indeterminate 1.6s infinite' : 'none',
-                  }} />
-                </div>
-                {scannedFiles.length > 0 && (
-                  <p style={{ fontSize: '12px', color: theme.textSecondary, marginTop: '10px' }}>
-                    {scannedFiles.length} file(s) found so far…
-                  </p>
+                );
+              })}
+            </div>
+
+            {/* Deep Scan All button */}
+            <div style={{ padding: '14px', borderTop: `1px solid ${t.border}`, flexShrink: 0 }}>
+              <button
+                className="scan-btn"
+                onClick={handleDeepScan}
+                disabled={scanStatus === 'running'}
+                style={{
+                  width: '100%', padding: '11px',
+                  background: scanStatus === 'running'
+                    ? t.scanDisabled
+                    : 'linear-gradient(135deg,#F95F9E 0%,#FC9CBF 100%)',
+                  color: scanStatus === 'running' ? t.textSecondary : 'white',
+                  border: 'none', borderRadius: '12px', fontSize: '13px', fontWeight: 600,
+                  cursor: scanStatus === 'running' ? 'not-allowed' : 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '7px',
+                  boxShadow: scanStatus === 'running' ? 'none' : '0 4px 14px rgba(249,95,158,0.35)',
+                  transition: 'all .2s',
+                }}
+              >
+                {scanStatus === 'running' ? (
+                  <>
+                    <span style={{
+                      width: '14px', height: '14px', flexShrink: 0,
+                      border: `2px solid ${isDarkMode ? 'rgba(249,95,158,0.18)' : 'rgba(249,95,158,0.2)'}`,
+                      borderTop: '2px solid #F95F9E', borderRadius: '50%',
+                      animation: 'spin 0.9s linear infinite',
+                    }} />
+                    Scanning…
+                  </>
+                ) : (
+                  <><ScanLine size={14} /> Deep Scan All</>
                 )}
+              </button>
+            </div>
+          </aside>
+
+          {/* ── MAIN PANEL ───────────────────────────────────────────── */}
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+
+            {/* Top bar */}
+            <div style={{
+              padding: '10px 20px', borderBottom: `1px solid ${t.border}`,
+              background: t.bgTopbar, backdropFilter: 'blur(18px)',
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px',
+              position: 'sticky', top: 0, zIndex: 20,
+              transition: 'background 0.2s, border-color 0.2s',
+            }}>
+              {/* Breadcrumb — shows Home > My Drive > FolderName */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '13px', fontWeight: 500, flexShrink: 0, flexWrap: 'wrap' }}>
+                <Home
+                  size={15}
+                  onClick={() => { handleBreadcrumbClick({ id: 'root', name: 'My Drive' }, 0); setViewMode('myDrive'); }}
+                  style={{ cursor: 'pointer', color: t.textSecondary }}
+                />
+                {folderBreadcrumb.map((crumb, idx) => (
+                  <React.Fragment key={crumb.id}>
+                    <ChevronRight size={13} style={{ color: t.textMuted }} />
+                    <span
+                      onClick={() => { handleBreadcrumbClick(crumb, idx); setViewMode('myDrive'); }}
+                      style={{
+                        cursor: 'pointer', transition: 'color .15s',
+                        color: idx === folderBreadcrumb.length - 1 && viewMode === 'myDrive'
+                          ? '#F95F9E' : t.textSecondary,
+                        fontWeight: idx === folderBreadcrumb.length - 1 && viewMode === 'myDrive' ? 700 : 500,
+                      }}
+                    >
+                      {crumb.name}
+                    </span>
+                  </React.Fragment>
+                ))}
+                {viewMode === 'scan' && (
+                  <>
+                    <ChevronRight size={13} style={{ color: t.textMuted }} />
+                    <span style={{ color: '#F95F9E', fontWeight: 700 }}>Deep Scan Results</span>
+                  </>
+                )}
+              </div>
+
+              {/* Search bar */}
+              <div style={{ position: 'relative', width: '280px' }}>
+                <Search size={14} style={{
+                  position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)',
+                  color: searchQuery ? '#F95F9E' : t.textMuted,
+                  transition: 'color .15s', pointerEvents: 'none',
+                }} />
+                <input
+                  type="text" placeholder="Search files…"
+                  value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
+                  className="drive-search"
+                  style={{
+                    width: '100%', paddingLeft: '36px', paddingRight: '14px',
+                    paddingTop: '9px', paddingBottom: '9px',
+                    background: t.bgInput, border: `1.5px solid ${t.border}`,
+                    borderRadius: '12px', fontSize: '13px',
+                    color: t.textPrimary, boxSizing: 'border-box', transition: 'all .15s',
+                  }}
+                />
+              </div>
+
+              {/* Disconnect Drive button (replaces old "Google Drive Access" button) */}
+              <button
+                onClick={handleDisconnectDrive}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: '8px',
+                  padding: '9px 16px',
+                  background: isDarkMode ? 'rgba(255,255,255,0.06)' : '#F8FAFC',
+                  color: t.textSecondary,
+                  border: `1.5px solid ${t.border}`,
+                  borderRadius: '12px', fontSize: '13px', fontWeight: 600,
+                  cursor: 'pointer', whiteSpace: 'nowrap',
+                  transition: 'all .2s', flexShrink: 0,
+                }}
+                onMouseEnter={e => { e.currentTarget.style.borderColor = 'rgba(249,95,158,0.4)'; e.currentTarget.style.color = '#F95F9E'; }}
+                onMouseLeave={e => { e.currentTarget.style.borderColor = t.border; e.currentTarget.style.color = t.textSecondary; }}
+              >
+                <img src="/assets/google-drive.png" alt="Drive" style={{ width: '18px', height: '18px' }} />
+                Disconnect Drive
+              </button>
+            </div>
+
+            {/* Success toast */}
+            {successMessage && (
+              <div style={{
+                position: 'fixed', bottom: '32px', left: '50%', transform: 'translateX(-50%)',
+                zIndex: 50, background: 'linear-gradient(135deg,#22c55e,#16a34a)',
+                color: 'white', padding: '12px 24px', borderRadius: '99px',
+                display: 'flex', alignItems: 'center', gap: '10px',
+                fontWeight: 600, fontSize: '14px',
+                boxShadow: '0 8px 32px rgba(34,197,94,0.3)',
+                animation: 'fadeUp .25s ease both',
+              }}>
+                <CheckCircle size={16} strokeWidth={3} /> {successMessage}
               </div>
             )}
 
-            {/* File cards */}
-            {(scanStatus === 'complete' || scannedFiles.length > 0 || viewMode === 'folder') && (
-              <div>
-                {/* Result header */}
-                <div style={{
-                  padding: '13px 20px', borderBottom: `1px solid ${theme.border}`,
-                  background: theme.resultHeader,
-                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                  transition: 'background 0.2s, border-color 0.2s',
-                }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            {/* Content area */}
+            <div style={{ flex: 1, overflowY: 'auto' }} className="drive-sb">
+
+              {/* ── MY DRIVE VIEW ──────────────────────────────────── */}
+              {viewMode === 'myDrive' && (
+                <div style={{ padding: '20px' }}>
+
+                  {myDriveLoading && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '20px 0', color: t.textSecondary, fontSize: '14px' }}>
+                      <div style={{
+                        width: '18px', height: '18px', borderRadius: '50%', flexShrink: 0,
+                        border: '2px solid rgba(249,95,158,0.2)', borderTop: '2px solid #F95F9E',
+                        animation: 'spin 0.8s linear infinite',
+                      }} />
+                      Loading your Drive…
+                    </div>
+                  )}
+
+                  {/* Folders grid */}
+                  {!myDriveLoading && myDriveFolders.length > 0 && (
+                    <div style={{ marginBottom: '20px' }}>
+                      <div style={{
+                        fontSize: '11px', fontWeight: 600, color: t.textMuted,
+                        textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '10px',
+                      }}>
+                        Folders ({myDriveFolders.length})
+                      </div>
+                      <div style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(auto-fill,minmax(175px,1fr))',
+                        gap: '10px',
+                      }}>
+                        {myDriveFolders.map(folder => (
+                          <div
+                            key={folder.id}
+                            onClick={() => handleFolderClick(folder)}
+                            style={{
+                              display: 'flex', alignItems: 'center', gap: '10px',
+                              padding: '10px 14px',
+                              background: t.bgSecondary, border: `1px solid ${t.border}`,
+                              borderRadius: '12px', cursor: 'pointer', transition: 'all .15s',
+                            }}
+                            onMouseEnter={e => { e.currentTarget.style.borderColor = 'rgba(249,95,158,0.4)'; e.currentTarget.style.background = t.folderHov; }}
+                            onMouseLeave={e => { e.currentTarget.style.borderColor = t.border; e.currentTarget.style.background = t.bgSecondary; }}
+                          >
+                            <FolderIcon size={18} style={{ color: '#F95F9E', flexShrink: 0 }} />
+                            <span style={{
+                              fontSize: '13px', fontWeight: 500, color: t.textPrimary,
+                              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                            }}>
+                              {folder.name}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Files grid */}
+                  {!myDriveLoading && myDriveFiles.length > 0 && (
+                    <div>
+                      <div style={{
+                        fontSize: '11px', fontWeight: 600, color: t.textMuted,
+                        textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '10px',
+                      }}>
+                        Files ({myDriveFiles.length})
+                      </div>
+                      <div className="file-grid" style={{ padding: 0 }}>
+                        {myDriveFiles.filter(f =>
+                          !searchQuery || f.name?.toLowerCase().includes(searchQuery.toLowerCase())
+                        ).map(file => (
+                          <FileCard
+                            key={file.id}
+                            file={file}
+                            searchQuery={searchQuery}
+                            theme={t}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Empty state */}
+                  {!myDriveLoading && myDriveFolders.length === 0 && myDriveFiles.length === 0 && (
+                    <div style={{ textAlign: 'center', padding: '80px 20px', animation: 'fadeUp .25s ease both' }}>
+                      <div style={{ fontSize: '48px', marginBottom: '14px', opacity: 0.45 }}>📂</div>
+                      <p style={{ fontSize: '15px', fontWeight: 600, color: t.textPrimary, marginBottom: '6px' }}>
+                        This folder is empty
+                      </p>
+                      <p style={{ fontSize: '13px', color: t.textSecondary }}>
+                        No files or folders found here.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ── SCAN VIEW ──────────────────────────────────────── */}
+              {viewMode === 'scan' && (
+                <div>
+                  {/* Scan progress bar — shows during and after scan */}
+                  {(scanStatus === 'running' || scanStatus === 'complete') && (
+                    <div style={{ padding: '20px 24px 12px', animation: 'fadeUp .2s ease both' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                          {scanStatus === 'running' && (
+                            <span style={{
+                              width: '18px', height: '18px', flexShrink: 0,
+                              border: `2.5px solid rgba(249,95,158,0.18)`,
+                              borderTop: '2.5px solid #F95F9E', borderRadius: '50%',
+                              animation: 'spin 0.9s linear infinite',
+                            }} />
+                          )}
+                          {scanStatus === 'complete' && (
+                            <CheckCircle size={18} style={{ color: '#22c55e', flexShrink: 0 }} />
+                          )}
+                          <div>
+                            <p style={{ fontSize: '14px', fontWeight: 600, color: t.textPrimary, margin: 0 }}>
+                              {scanStatus === 'running' ? 'Scanning your Google Drive…' : 'Scan Complete'}
+                            </p>
+                            {scanProgress.current_file && scanStatus === 'running' && (
+                              <p style={{
+                                fontSize: '11px', color: t.textSecondary,
+                                margin: '2px 0 0', maxWidth: '380px',
+                                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                              }}>
+                                📄 {scanProgress.current_file}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                        <span style={{ fontSize: '13px', fontWeight: 700, color: '#F95F9E' }}>
+                          {scannedFiles.length > 0
+                            ? `${scannedFiles.length} file${scannedFiles.length !== 1 ? 's' : ''} found`
+                            : 'Scanning…'
+                          }
+                          {scanProgress.current_file && scanStatus === 'running' ? '' : ''}
+                        </span>
+                      </div>
+
+                      {/* Progress line */}
+                      <div style={{ height: '6px', background: t.scanBarBg, borderRadius: '99px', overflow: 'hidden', maxWidth: '500px' }}>
+                        <div style={{
+                          height: '100%',
+                          width: scanStatus === 'complete' ? '100%' : '60%',
+                          background: 'linear-gradient(90deg,#F95F9E,#FC9CBF)',
+                          borderRadius: '99px',
+                          transition: scanStatus === 'complete' ? 'width 0.6s ease' : 'none',
+                          animation: scanStatus === 'running' ? 'indeterminate 1.6s infinite' : 'none',
+                        }} />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Header info */}
+                  <div style={{
+                    padding: '12px 20px', borderBottom: `1px solid ${t.border}`,
+                    background: t.resultHeader,
+                    display: 'flex', alignItems: 'center', gap: '8px',
+                    transition: 'background 0.2s, border-color 0.2s',
+                  }}>
                     <FileSearch size={14} style={{ color: '#F95F9E' }} />
-                    <span style={{ fontSize: '13px', fontWeight: 600, color: theme.textPrimary }}>
-                      {viewMode === 'scan' ? 'Deep Scan Results' : currentFolderName}
+                    <span style={{ fontSize: '13px', fontWeight: 600, color: t.textPrimary }}>
+                      Deep Scan Results
                     </span>
                     <span style={{
                       fontSize: '11px', fontWeight: 700,
@@ -1326,66 +1469,49 @@ export default function DrivePage() {
                       {displayFiles.length} file{displayFiles.length !== 1 ? 's' : ''}
                     </span>
                   </div>
-                  {viewMode === 'folder' && (
-                    <button onClick={handleBackToRoot} style={{
-                      fontSize: '12px', fontWeight: 500, color: '#F95F9E',
-                      background: 'rgba(249,95,158,0.09)', border: '1px solid rgba(249,95,158,0.22)',
-                      borderRadius: '8px', padding: '4px 12px', cursor: 'pointer',
-                    }}>← All files</button>
+
+                  {/* Empty state or list */}
+                  {displayFiles.length === 0 && scanStatus !== 'running' ? (
+                    <div style={{ textAlign: 'center', padding: '80px 20px', animation: 'fadeUp .25s ease both' }}>
+                      <div style={{ fontSize: '52px', marginBottom: '16px', opacity: 0.45 }}>📂</div>
+                      <p style={{ fontSize: '15px', fontWeight: 600, color: t.textPrimary, marginBottom: '6px' }}>
+                        No scan results
+                      </p>
+                      <p style={{ fontSize: '13px', color: t.textSecondary, maxWidth: '320px', margin: '0 auto 20px', lineHeight: 1.6 }}>
+                        Deep scan finds all files in your Google Drive root and nested folders so you can search them.
+                      </p>
+                      <button
+                        onClick={handleDeepScan}
+                        style={{
+                          padding: '10px 28px',
+                          background: 'linear-gradient(135deg,#F95F9E,#FC9CBF)',
+                          color: 'white', border: 'none', borderRadius: '12px',
+                          fontSize: '13px', fontWeight: 600, cursor: 'pointer',
+                          boxShadow: '0 4px 14px rgba(249,95,158,0.30)',
+                        }}
+                      >
+                        Start Deep Scan
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="file-grid">
+                      {displayFiles.map(file => (
+                        <FileCard
+                          key={file.id}
+                          file={file}
+                          searchQuery={searchQuery}
+                          theme={t}
+                        />
+                      ))}
+                    </div>
                   )}
                 </div>
-
-                {/* Empty state */}
-                {displayFiles.length === 0 && scanStatus !== 'running' ? (
-                  <div style={{ textAlign: 'center', padding: '80px 20px', animation: 'fadeUp .25s ease both' }}>
-                    <div style={{ fontSize: '52px', marginBottom: '16px', opacity: 0.45 }}>📂</div>
-                    <p style={{ fontSize: '15px', fontWeight: 600, color: theme.textPrimary, marginBottom: '6px' }}>
-                      {searchQuery ? 'No files match your search' : 'No files found'}
-                    </p>
-                    <p style={{ fontSize: '13px', color: theme.textSecondary, lineHeight: 1.7 }}>
-                      {searchQuery ? 'Try a different keyword.' : 'Add files to NEXORA on Google Drive\nthen click Deep Scan All.'}
-                    </p>
-                  </div>
-                ) : (
-                  <div className="file-grid">
-                    {displayFiles.map(file => (
-                      <FileCard
-                        key={file.id || file.drive_id}
-                        file={file}
-                        searchQuery={searchQuery}
-                        theme={theme}
-                      />
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Failed */}
-            {scanStatus === 'failed' && scannedFiles.length === 0 && (
-              <div style={{ textAlign: 'center', padding: '80px 20px', animation: 'fadeUp .25s ease both' }}>
-                <div style={{ fontSize: '44px', marginBottom: '12px' }}>⚠️</div>
-                <p style={{ fontSize: '14px', fontWeight: 600, color: '#ef4444', marginBottom: '8px' }}>Scan failed</p>
-                <p style={{ fontSize: '12px', color: theme.textSecondary, lineHeight: 1.8 }}>
-                  Make sure NEXORA is shared with:<br />
-                  <code style={{ fontSize: '11px', background: theme.codeBlock, color: theme.textPrimary, padding: '2px 7px', borderRadius: '5px' }}>
-                    drive-accessor@nexora-project-495714.iam.gserviceaccount.com
-                  </code>
-                </p>
-                <button onClick={scanFiles} style={{
-                  marginTop: '20px', padding: '10px 28px',
-                  background: 'linear-gradient(135deg,#F95F9E,#FC9CBF)',
-                  color: 'white', border: 'none', borderRadius: '12px',
-                  fontSize: '13px', fontWeight: 600, cursor: 'pointer',
-                  boxShadow: '0 4px 14px rgba(249,95,158,0.30)',
-                }}>
-                  Retry Scan
-                </button>
-              </div>
-            )}
+              )}
+            </div>
           </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
+
