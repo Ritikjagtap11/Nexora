@@ -189,6 +189,7 @@ async def list_documents(current_user: dict = Depends(get_current_user)):
                 file_size=meta.get('file_size', 0),
                 summary=doc.get('summary'),
                 suggested_questions=_clean_suggested_questions(doc.get('suggested_questions') or meta.get('suggested_questions')),
+                drive_file_id=doc.get('drive_file_id') or meta.get('drive_file_id'),
                 cloudinary_url=meta.get('cloudinary_url'),
                 cloudinary_public_id=meta.get('cloudinary_public_id'),
             ))

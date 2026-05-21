@@ -55,53 +55,7 @@ export default function Sidebar({ className, onSuggestedQuestion, onLoadHistory,
   return (
     <div className={`flex flex-col p-4 h-full gap-3 ${className}`}>
 
-      {/* ── AI Engine Status ─────────────────────────────────────────────── */}
-      {llmStatus && (
-        <div className="p-3.5 bg-white/90 border border-primary/12 rounded-xl shadow-sm dark:bg-white/5 dark:border-white/10">
-          <div className="flex items-center gap-2 mb-2 text-sm font-semibold text-gray-800 dark:text-white/90">
-            <Cpu className="w-4 h-4 text-primary" />
-            AI Engine Status
-          </div>
-          <div className="text-xs text-gray-500 dark:text-gray-400 mb-2 flex items-center gap-1 flex-wrap">
-            <span className="font-bold text-gray-800 dark:text-white/90">Gemini</span>
-            <span className="mx-1">→</span>
-            <span className="font-bold text-gray-800 dark:text-white/90">Ollama</span>
-            <span className="text-gray-400">(fallback)</span>
-          </div>
-          <div className="flex flex-col gap-1 text-xs">
-            {['gemini', 'ollama'].map(provider => (
-              <div key={provider} className="flex items-center justify-between bg-white dark:bg-background-dark px-2 py-1 rounded border border-gray-200 dark:border-white/5 shadow-sm">
-                <div className="flex items-center gap-1">
-                  {getProviderIcon(provider)}
-                  <span className="text-gray-700 dark:text-gray-300 capitalize">{provider}</span>
-                </div>
-                {provider === 'gemini' ? (
-                  <span className={llmStatus.gemini?.configured_keys > 0 ? 'text-green-500' : 'text-red-500'}>
-                    {llmStatus.gemini?.configured_keys > 0 ? `${llmStatus.gemini.configured_keys} key(s)` : 'Off'}
-                  </span>
-                ) : (
-                  <span className={llmStatus.ollama?.available ? 'text-green-500' : 'text-gray-400'}>
-                    {llmStatus.ollama?.available ? 'Ready' : 'Unavailable'}
-                  </span>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
 
-      {/* ── Drive Explorer button ────────────────────────────────────────── */}
-      <button
-        onClick={() => navigate('/app/drive')}
-        className="flex items-center justify-center gap-2 py-2.5 w-full rounded-xl text-white text-[13px] font-semibold transition-all"
-        style={{
-          background: 'linear-gradient(135deg, #F95F9E, #FC9CBF)',
-          boxShadow: '0 3px 12px rgba(249,95,158,0.30)',
-        }}
-      >
-        <HardDrive size={16} />
-        Drive Explorer
-      </button>
 
 
 

@@ -11,6 +11,7 @@ import DrivePage from './pages/DrivePage';
 import DocumentsPage from './pages/DocumentsPage';
 import ChatPage from './pages/ChatPage';
 import { pdfjs } from 'react-pdf';
+import { BackgroundTasksProvider } from './context/BackgroundTasksContext';
 import './App.css';
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
@@ -49,7 +50,8 @@ function App() {
   return (
     <ThemeProvider>
       <DialogProvider>
-        <Router>
+        <BackgroundTasksProvider>
+          <Router>
           <Routes>
             <Route path="/" element={<Landing />} />
             <Route path="/login" element={<PublicRoute><Login /></PublicRoute>} />
@@ -85,6 +87,7 @@ function App() {
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </Router>
+        </BackgroundTasksProvider>
       </DialogProvider>
     </ThemeProvider>
   );

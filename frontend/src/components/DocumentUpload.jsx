@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { Upload, FileText, AlertCircle, CheckCircle, X } from 'lucide-react';
-import { documentAPI } from '../services/api';
 import { useDialog } from '../context/DialogContext';
+import { useBackgroundTasks } from '../context/BackgroundTasksContext';
 
 const ACCEPTED_EXTENSIONS = '.pdf,.docx,.txt,.md,.csv,.pptx,.xlsx';
 
@@ -34,10 +34,10 @@ function isValidFile(file) {
 
 export default function DocumentUpload({ isOpen, onClose, onUploadComplete, folderId }) {
   const [files, setFiles] = useState([]);
-  const [uploading, setUploading] = useState(false);
   const [message, setMessage] = useState({ type: '', text: '' });
   const [isDragging, setIsDragging] = useState(false);
   const { alert } = useDialog();
+  const { uploadAndIndexDocument } = useBackgroundTasks();
   const dropRef = useRef(null);
 
   // Clear state when opened
@@ -45,7 +45,6 @@ export default function DocumentUpload({ isOpen, onClose, onUploadComplete, fold
     if (isOpen) {
       setFiles([]);
       setMessage({ type: '', text: '' });
-      setUploading(false);
     }
   }, [isOpen]);
 
@@ -95,38 +94,15 @@ export default function DocumentUpload({ isOpen, onClose, onUploadComplete, fold
     }
   };
 
-  const handleUpload = async () => {
+  const handleUpload = () => {
     if (files.length === 0) return;
 
-    setUploading(true);
-    setMessage({ type: '', text: '' });
-
-    try {
-      let successCount = 0;
-      for (const file of files) {
-         // Pass folderId to the API if present
-         await documentAPI.uploadDocument(file, null, null, folderId);
-         successCount++;
-      }
-      setMessage({ 
-        type: 'success', 
-        text: `${successCount} file(s) uploaded successfully! Saved to Google Drive${folderId ? ' -> Selected Folder' : ''}.` 
-      });
-      setFiles([]);
-      if (onUploadComplete) onUploadComplete();
-      
-      setTimeout(() => {
-        onClose();
-      }, 2500);
-    } catch (error) {
-      setMessage({ 
-        type: 'error', 
-        text: error.response?.data?.detail || 'Upload failed' 
-      });
-      await alert(error.response?.data?.detail || 'Upload failed');
-    } finally {
-      setUploading(false);
+    for (const file of files) {
+      uploadAndIndexDocument(file, folderId);
     }
+    setFiles([]);
+    if (onUploadComplete) onUploadComplete();
+    onClose();
   };
 
   return (
@@ -181,10 +157,10 @@ export default function DocumentUpload({ isOpen, onClose, onUploadComplete, fold
         
         <button 
           onClick={handleUpload} 
-          disabled={files.length === 0 || uploading}
+          disabled={files.length === 0}
           className="mt-4 px-6 py-2.5 bg-primary hover:bg-primary-light disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-white text-sm font-semibold transition-colors w-full shadow-sm"
         >
-          {uploading ? 'Processing...' : 'Upload'}
+          Upload
         </button>
       </div>
 

@@ -7,6 +7,7 @@ import {
   CheckSquare, Square,
 } from 'lucide-react';
 import { documentAPI } from '../services/api';
+import { useBackgroundTasks } from '../context/BackgroundTasksContext';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -136,10 +137,11 @@ const SkeletonCard = () => (
 );
 
 // ─── Document card ───────────────────────────────────────────────────────────────
-const DocumentCard = ({ doc, isSelected, onToggle, onDelete, deleting, searchQuery }) => {
+const DocumentCard = ({ doc, isSelected, onToggle, onDelete, deleting, searchQuery, retryUpload, retryDriveFileIndex }) => {
   const name = doc.filename || doc.name || 'Untitled';
   const { Icon, iconColor, bg, badgeCls, ext } = getFileInfo(name);
   const displayName = name.includes('.') ? name.substring(0, name.lastIndexOf('.')) : name;
+  const status = doc.status || 'Indexed';
 
   return (
     <div
@@ -148,7 +150,11 @@ const DocumentCard = ({ doc, isSelected, onToggle, onDelete, deleting, searchQue
           ? 'border-primary/50 bg-primary/[0.07] shadow-[0_0_0_1px_rgba(233,30,140,0.2),0_4px_16px_rgba(233,30,140,0.08)]'
           : 'border-white/[0.07] bg-white/[0.025] hover:border-primary/25 hover:bg-white/[0.045]'
         }`}
-      onClick={() => onToggle(doc.id)}
+      onClick={() => {
+        if (status === 'Indexed') {
+          onToggle(doc.id);
+        }
+      }}
     >
       {/* Deleting overlay */}
       {deleting && <DeletingOverlay />}
@@ -160,15 +166,17 @@ const DocumentCard = ({ doc, isSelected, onToggle, onDelete, deleting, searchQue
       <div className="flex items-center gap-2.5">
 
         {/* Checkbox (always visible when selected, hover otherwise) */}
-        <div
-          className={`shrink-0 transition-opacity ${isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
-          onClick={e => { e.stopPropagation(); onToggle(doc.id); }}
-        >
-          {isSelected
-            ? <CheckSquare size={14} className="text-primary" />
-            : <Square size={14} className="text-gray-500" />
-          }
-        </div>
+        {status === 'Indexed' && (
+          <div
+            className={`shrink-0 transition-opacity ${isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
+            onClick={e => { e.stopPropagation(); onToggle(doc.id); }}
+          >
+            {isSelected
+              ? <CheckSquare size={14} className="text-primary" />
+              : <Square size={14} className="text-gray-500" />
+            }
+          </div>
+        )}
 
         {/* File icon */}
         <div className={`shrink-0 w-8 h-8 rounded-lg ${bg} flex items-center justify-center`}>
@@ -187,23 +195,65 @@ const DocumentCard = ({ doc, isSelected, onToggle, onDelete, deleting, searchQue
       </div>
 
       {/* ── Row 2: date · separator · size ── */}
-      <div className="flex items-center gap-2 pl-[46px] text-xs text-gray-500">
-        <CalendarDays size={9} className="shrink-0" />
-        <span>{formatDate(doc.created_at || doc.uploaded_at || doc.upload_date)}</span>
-        <span className="text-gray-700">·</span>
-        <Database size={9} className="shrink-0" />
-        <span>{formatBytes(doc.bytes || doc.file_size || doc.size)}</span>
+      <div className="flex items-center justify-between pl-[46px] pr-2 mt-1">
+        <div className="flex items-center gap-2 text-xs text-gray-500">
+          <CalendarDays size={9} className="shrink-0" />
+          <span>{formatDate(doc.created_at || doc.uploaded_at || doc.upload_date)}</span>
+          <span className="text-gray-700">·</span>
+          <Database size={9} className="shrink-0" />
+          <span>{formatBytes(doc.bytes || doc.file_size || doc.size)}</span>
+        </div>
+
+        {/* Status indicator badges */}
+        <div className="flex items-center gap-2">
+          {status === 'Pending' && (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-yellow-500/10 text-yellow-600 dark:text-yellow-400 text-[10px] font-bold uppercase tracking-wider rounded-md border border-yellow-500/20 animate-pulse">
+              Pending
+            </span>
+          )}
+          {status === 'Scanning' && (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-primary/10 text-primary text-[10px] font-bold uppercase tracking-wider rounded-md border border-primary/20">
+              <svg className="animate-spin h-2.5 w-2.5 text-primary mr-1 shrink-0 inline-block" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              Scanning
+            </span>
+          )}
+          {status === 'Failed' && (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-red-500/10 text-red-600 dark:text-red-400 text-[10px] font-bold uppercase tracking-wider rounded-md border border-red-500/20">
+              Failed
+            </span>
+          )}
+        </div>
       </div>
 
-      {/* Delete button — bottom-right on hover */}
-      <button
-        onClick={e => { e.stopPropagation(); onDelete(doc); }}
-        disabled={deleting}
-        className="absolute bottom-2.5 right-2.5 opacity-0 group-hover:opacity-100 transition-all duration-150 w-6 h-6 rounded-lg flex items-center justify-center bg-red-500/10 hover:bg-red-500/25 text-red-400 border border-red-500/20 z-10"
-        title="Delete"
-      >
-        <Trash2 size={11} />
-      </button>
+      {/* Action buttons (Delete / Retry) */}
+      {status === 'Failed' ? (
+        <button
+          onClick={e => {
+            e.stopPropagation();
+            if (doc.isDriveFile) {
+              retryDriveFileIndex(doc.id, name);
+            } else {
+              retryUpload(doc.id);
+            }
+          }}
+          className="absolute bottom-2 right-2 flex items-center gap-1 px-2.5 py-1.5 bg-red-500 hover:bg-red-600 text-white rounded-lg text-xs font-semibold shadow-sm transition-all"
+        >
+          <RefreshCw size={11} className="animate-pulse mr-1" />
+          Retry
+        </button>
+      ) : status === 'Indexed' ? (
+        <button
+          onClick={e => { e.stopPropagation(); onDelete(doc); }}
+          disabled={deleting}
+          className="absolute bottom-2.5 right-2.5 opacity-0 group-hover:opacity-100 transition-all duration-150 w-6 h-6 rounded-lg flex items-center justify-center bg-red-500/10 hover:bg-red-500/25 text-red-400 border border-red-500/20 z-10"
+          title="Delete"
+        >
+          <Trash2 size={11} />
+        </button>
+      ) : null}
     </div>
   );
 };
@@ -295,6 +345,7 @@ const ConfirmModal = ({ count, docName, onConfirm, onCancel, loading }) => {
 
 // ─── Main ────────────────────────────────────────────────────────────────────────
 export default function MyDocumentsList() {
+  const { backgroundDocuments, retryUpload, retryDriveFileIndex } = useBackgroundTasks();
   const [documents, setDocuments]         = useState([]);
   const [loading, setLoading]             = useState(true);
   const [refreshing, setRefreshing]       = useState(false);
@@ -339,12 +390,27 @@ const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => { fetchDocuments(false); }, [fetchDocuments]);
 
+  // ── Merge loaded docs with background documents ─────────────────────────────
+  const displayDocs = useMemo(() => {
+    const loadedIds = new Set(documents.map(d => d.id));
+    const loadedFilenames = new Set(documents.map(d => (d.filename || d.name || '').toLowerCase()));
+
+    const pendingOrFailedBackground = backgroundDocuments.filter(d => {
+      if (loadedIds.has(d.id)) return false;
+      const nameLower = (d.filename || d.name || '').toLowerCase();
+      if (nameLower && loadedFilenames.has(nameLower)) return false;
+      return d.status !== 'Indexed';
+    });
+
+    return [...pendingOrFailedBackground, ...documents];
+  }, [documents, backgroundDocuments]);
+
   // ── Filter ───────────────────────────────────────────────────────────────────
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return documents;
-    return documents.filter(d => (d.filename || d.name || '').toLowerCase().includes(q));
-  }, [documents, search]);
+    if (!q) return displayDocs;
+    return displayDocs.filter(d => (d.filename || d.name || '').toLowerCase().includes(q));
+  }, [displayDocs, search]);
 
   // ── Selection ────────────────────────────────────────────────────────────────
   const toggleOne = (id) =>
@@ -437,7 +503,7 @@ const [isDeleting, setIsDeleting] = useState(false);
             My Documents
           </h1>
           <p className="text-[11px] text-gray-500 mt-0.5 pl-6">
-            {loading ? 'Loading…' : `${documents.length} file${documents.length !== 1 ? 's' : ''} · sorted by latest`}
+            {loading ? 'Loading…' : `${displayDocs.length} file${displayDocs.length !== 1 ? 's' : ''} · sorted by latest`}
           </p>
         </div>
 
@@ -559,6 +625,8 @@ const [isDeleting, setIsDeleting] = useState(false);
                 onDelete={requestDelete}
                 deleting={deletingIds.has(doc.id)}
                 searchQuery={search}
+                retryUpload={retryUpload}
+                retryDriveFileIndex={retryDriveFileIndex}
               />
             ))}
           </div>

@@ -5,6 +5,7 @@ import { useTheme } from '../context/ThemeContext';
 import { useDialog } from '../context/DialogContext';
 import { useAuth } from '../context/AuthContext';
 import driveLogo from "/assets/google-drive.png";
+import { useBackgroundTasks } from '../context/BackgroundTasksContext';
 
 import {
   Folder as FolderIcon,
@@ -29,6 +30,8 @@ import {
   Music,
   Video,
   Database,
+  Menu,
+  X,
 } from 'lucide-react';
 
 // ─── Theme tokens ─────────────────────────────────────────────────────────────
@@ -554,10 +557,18 @@ const HighlightText = ({ text, query }) => {
 };
 
 // ─── FileCard ─────────────────────────────────────────────────────────────────
-const FileCard = ({ file, searchQuery, theme }) => {
+const FileCard = ({ file, searchQuery, theme, indexedDriveFileIds, backgroundDocuments, indexDriveFile, retryDriveFileIndex }) => {
   const [hov, setHov] = useState(false);
   const typeInfo = getFileTypeInfo(file.mimeType, file.name);
   const fullPath = file.full_path || file.folderPath || 'NEXORA';
+
+  const ALLOWED_EXTENSIONS = ['pdf', 'docx', 'txt', 'md', 'csv', 'pptx', 'xlsx'];
+  const ext = file.name?.split('.').pop()?.toLowerCase();
+  const isIndexable = ALLOWED_EXTENSIONS.includes(ext);
+
+  const bgDoc = backgroundDocuments ? backgroundDocuments.find(d => d.id === file.id) : null;
+  const bgStatus = bgDoc ? bgDoc.status : null;
+  const isIndexed = (indexedDriveFileIds && indexedDriveFileIds.has(file.id)) || bgStatus === 'Indexed';
 
   return (
     <div
@@ -693,28 +704,31 @@ const FileCard = ({ file, searchQuery, theme }) => {
             </span>
           )}
         </div>
-        {(file.webViewLink || file.drive_web_link) && (
-          <button
-            onClick={() => window.open(file.webViewLink || file.drive_web_link, '_blank')}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '4px',
-              fontSize: '11px',
-              fontWeight: 600,
-              color: typeInfo.color,
-              background: hov ? `${typeInfo.color}1a` : `${typeInfo.color}0f`,
-              border: `1px solid ${typeInfo.border}`,
-              borderRadius: '8px',
-              padding: '5px 10px',
-              cursor: 'pointer',
-              transition: 'all 0.15s',
-              flexShrink: 0,
-            }}
-          >
-            <ExternalLink size={10} /> Drive
-          </button>
-        )}
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          {(file.webViewLink || file.drive_web_link) && (
+            <button
+              onClick={() => window.open(file.webViewLink || file.drive_web_link, '_blank')}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '4px',
+                fontSize: '11px',
+                fontWeight: 600,
+                color: typeInfo.color,
+                background: hov ? `${typeInfo.color}1a` : `${typeInfo.color}0f`,
+                border: `1px solid ${typeInfo.border}`,
+                borderRadius: '8px',
+                padding: '5px 10px',
+                cursor: 'pointer',
+                transition: 'all 0.15s',
+                flexShrink: 0,
+              }}
+            >
+              <ExternalLink size={10} /> Drive
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -728,6 +742,18 @@ export default function DrivePage() {
   const { confirm } = useDialog();
   const navigate = useNavigate();
   const { token } = useAuth();
+
+  const {
+    backgroundDocuments,
+    indexedDriveFileIds,
+    deepScanState,
+    startPersistentDeepScan,
+    indexDriveFile,
+    retryDriveFileIndex,
+    indexDriveFolder,
+  } = useBackgroundTasks();
+
+  const { scanStatus, scanProgress, scannedFiles, scanJobId } = deepScanState;
 
   // ── helpers ────────────────────────────────────────────────────────
   const BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
@@ -751,17 +777,12 @@ export default function DrivePage() {
   const [currentFolderId, setCurrentFolderId] = useState('root');
   const [folderBreadcrumb, setFolderBreadcrumb] = useState([{ id: 'root', name: 'My Drive' }]);
 
-  // ── Scan state ─────────────────────────────────────────────────────
-  const [scannedFiles, setScannedFiles] = useState([]);
-  const [scanStatus, setScanStatus] = useState('idle'); // idle|running|complete|failed
-  const [scanProgress, setScanProgress] = useState({ scanned: 0, total: 0, current_file: '' });
-  const [scanJobId, setScanJobId] = useState(null);
-
   // ── Other UI state ─────────────────────────────────────────────────
   const [searchQuery, setSearchQuery] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
   const [hoveredFolder, setHoveredFolder] = useState(null);
   const [viewMode, setViewMode] = useState('myDrive'); // myDrive | scan
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
   const pollRef = useRef(null);
 
@@ -784,7 +805,6 @@ export default function DrivePage() {
 
         if (connected) {
           loadMyDrive('root');
-          restoreScanFromSession();
         }
       } catch {
         if (!ignore) {
@@ -801,19 +821,7 @@ export default function DrivePage() {
   }, []);
 
   // ── Restore scan results from sessionStorage on navigation ─────────
-  const restoreScanFromSession = () => {
-    try {
-      const cached = sessionStorage.getItem('nexora_my_scan_files');
-      const cachedStatus = sessionStorage.getItem('nexora_my_scan_status');
-      if (cached && cachedStatus === 'complete') {
-        const files = JSON.parse(cached);
-        if (files.length > 0) {
-          setScannedFiles(files);
-          setScanStatus('complete');
-        }
-      }
-    } catch (e) { }
-  };
+  const restoreScanFromSession = () => {};
 
   // ── Load My Drive folders+files for a given folder ──────────────────
   const loadMyDrive = async (folderId = 'root', folderName = 'My Drive') => {
@@ -853,8 +861,6 @@ export default function DrivePage() {
       setDriveConnected(false);
       setMyDriveFolders([]);
       setMyDriveFiles([]);
-      setScannedFiles([]);
-      setScanStatus('idle');
       setFolderBreadcrumb([{ id: 'root', name: 'My Drive' }]);
       sessionStorage.removeItem('nexora_my_scan_files');
       sessionStorage.removeItem('nexora_my_scan_status');
@@ -868,67 +874,21 @@ export default function DrivePage() {
     setFolderBreadcrumb(prev => [...prev, { id: folder.id, name: folder.name }]);
     loadMyDrive(folder.id, folder.name);
     setViewMode('myDrive');
+    setMobileSidebarOpen(false);
   };
 
   const handleBreadcrumbClick = (crumb, index) => {
     setFolderBreadcrumb(prev => prev.slice(0, index + 1));
     loadMyDrive(crumb.id, crumb.name);
     setViewMode('myDrive');
+    setMobileSidebarOpen(false);
   };
 
   // ── Deep Scan (user's own drive) ───────────────────────────────────
-  const handleDeepScan = async () => {
-    if (scanStatus === 'running') return;
-    setScanStatus('running');
-    setScanProgress({ scanned: 0, total: 0, current_file: '' });
-    setScannedFiles([]);
+  const handleDeepScan = () => {
     setViewMode('scan');
-
-    try {
-      const res = await authFetch('/api/drive/my-scan', { method: 'POST' });
-      if (!res.ok) throw new Error('Scan start failed');
-      const { job_id } = await res.json();
-      setScanJobId(job_id);
-
-      // Poll every 1.5s — show files as they come in (before scan completes)
-      if (pollRef.current) clearInterval(pollRef.current);
-      pollRef.current = setInterval(async () => {
-        try {
-          const sr = await authFetch(`/api/drive/scan/${job_id}`);
-          const data = await sr.json();
-
-          setScanProgress({
-            scanned: data.scanned || 0,
-            total: data.total || 0,
-            current_file: data.current_file || '',
-          });
-
-          // Show files immediately as they arrive — don't wait for completion
-          if (data.files?.length > 0) setScannedFiles([...data.files]);
-
-          if (data.status === 'complete' || data.status === 'failed') {
-            clearInterval(pollRef.current);
-            pollRef.current = null;
-            setScanStatus(data.status);
-            setScannedFiles(data.files || []);
-
-            if (data.status === 'complete') {
-              try {
-                sessionStorage.setItem('nexora_my_scan_files', JSON.stringify(data.files || []));
-                sessionStorage.setItem('nexora_my_scan_status', 'complete');
-              } catch (e) { }
-            }
-          }
-        } catch (e) {
-          clearInterval(pollRef.current);
-          pollRef.current = null;
-          setScanStatus('failed');
-        }
-      }, 1500);
-
-    } catch (e) {
-      setScanStatus('failed');
-    }
+    startPersistentDeepScan();
+    setMobileSidebarOpen(false);
   };
 
   // ── Search filter ──────────────────────────────────────────────────
@@ -952,6 +912,7 @@ export default function DrivePage() {
       <SharedNavbar />
 
       {/* Keep all existing keyframes + scrollbar styles */}
+      {/* Keep all existing keyframes + scrollbar styles */}
       <style>{`
         @keyframes spin          { to { transform: rotate(360deg); } }
         @keyframes fadeUp        { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:translateY(0); } }
@@ -964,6 +925,103 @@ export default function DrivePage() {
         .scan-btn:not(:disabled):hover { transform:translateY(-1px); box-shadow:0 6px 22px rgba(249,95,158,0.42) !important; }
         .file-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:16px; padding:20px; animation:fadeUp .22s ease both; }
         .sb-folder-row:hover .sb-delete-btn { opacity:1 !important; }
+        
+        /* Mobile Slide-Over Sidebar Drawer & FAB styling */
+        @media (max-width: 1023px) {
+          .drive-sidebar-container {
+            position: fixed !important;
+            top: 0 !important;
+            bottom: 0 !important;
+            left: 0 !important;
+            height: 100vh !important;
+            z-index: 1000 !important;
+            transform: translateX(-100%);
+            box-shadow: 8px 0 32px rgba(0,0,0,0.3) !important;
+            width: 280px !important;
+            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+          }
+          .drive-sidebar-container.open {
+            transform: translateX(0) !important;
+          }
+          .mobile-sidebar-fab {
+            display: flex !important;
+          }
+        }
+        
+        /* Responsiveness for all 5 breakpoints */
+        /* Breakpoint 1: Mobile Small (<375px) */
+        @media (max-width: 374px) {
+          .file-grid {
+            grid-template-columns: 1fr !important;
+            padding: 10px !important;
+            gap: 12px !important;
+          }
+          .drive-topbar {
+            flex-direction: column !important;
+            align-items: stretch !important;
+            gap: 10px !important;
+            padding: 10px 14px !important;
+          }
+          .drive-topbar-search {
+            width: 100% !important;
+          }
+        }
+        
+        /* Breakpoint 2: Mobile Medium (375px - 425px) */
+        @media (min-width: 375px) and (max-width: 424px) {
+          .file-grid {
+            grid-template-columns: 1fr !important;
+            padding: 12px !important;
+            gap: 14px !important;
+          }
+          .drive-topbar {
+            flex-direction: column !important;
+            align-items: stretch !important;
+            gap: 10px !important;
+            padding: 12px 16px !important;
+          }
+          .drive-topbar-search {
+            width: 100% !important;
+          }
+        }
+        
+        /* Breakpoint 3: Mobile Large (425px - 768px) */
+        @media (min-width: 425px) and (max-width: 767px) {
+          .file-grid {
+            grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)) !important;
+            padding: 14px !important;
+            gap: 14px !important;
+          }
+          .drive-topbar {
+            flex-direction: column !important;
+            align-items: stretch !important;
+            gap: 10px !important;
+            padding: 12px 16px !important;
+          }
+          .drive-topbar-search {
+            width: 100% !important;
+          }
+        }
+        
+        /* Breakpoint 4: Tablet (768px - 1024px) */
+        @media (min-width: 768px) and (max-width: 1023px) {
+          .file-grid {
+            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)) !important;
+            padding: 16px !important;
+            gap: 16px !important;
+          }
+          .drive-topbar {
+            gap: 12px !important;
+            padding: 12px 20px !important;
+          }
+        }
+        
+        /* Breakpoint 5: Desktop (>=1024px) */
+        @media (min-width: 1024px) {
+          .mobile-sidebar-fab {
+            display: none !important;
+          }
+        }
       `}</style>
 
       {/* ── CHECKING STATE ───────────────────────────────────────────── */}
@@ -1051,14 +1109,58 @@ export default function DrivePage() {
       {driveConnected === true && (
         <div className="flex flex-1 overflow-hidden" style={{ paddingTop: '88px' }}>
 
+          {/* Sidebar Overlay for Mobile */}
+          {mobileSidebarOpen && (
+            <div
+              onClick={() => setMobileSidebarOpen(false)}
+              style={{
+                position: 'fixed',
+                inset: 0,
+                background: 'rgba(15,23,42,0.6)',
+                backdropFilter: 'blur(4px)',
+                zIndex: 998,
+                animation: 'fadeUp 0.2s ease both',
+              }}
+            />
+          )}
+
+          {/* Floating FAB trigger for Mobile Sidebar */}
+          <button
+            className="mobile-sidebar-fab"
+            onClick={() => setMobileSidebarOpen(true)}
+            style={{
+              position: 'fixed',
+              bottom: '24px',
+              left: '24px',
+              width: '50px',
+              height: '50px',
+              borderRadius: '50%',
+              background: 'linear-gradient(135deg,#F95F9E,#FC9CBF)',
+              color: 'white',
+              border: 'none',
+              boxShadow: '0 4px 16px rgba(249,95,158,0.4)',
+              display: 'none',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: 'pointer',
+              zIndex: 990,
+              transition: 'all 0.2s',
+            }}
+          >
+            <FolderIcon size={20} />
+          </button>
+
           {/* ── SIDEBAR ──────────────────────────────────────────────── */}
-          <aside style={{
-            width: '252px', flexShrink: 0,
-            borderRight: `1px solid ${t.border}`,
-            height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden',
-            background: t.bgSidebar, backdropFilter: 'blur(20px)',
-            transition: 'background 0.2s, border-color 0.2s',
-          }}>
+          <aside
+            className={`drive-sidebar-container ${mobileSidebarOpen ? 'open' : ''}`}
+            style={{
+              width: '252px', flexShrink: 0,
+              borderRight: `1px solid ${t.border}`,
+              height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden',
+              background: t.bgSidebar, backdropFilter: 'blur(20px)',
+              transition: 'background 0.2s, border-color 0.2s, transform 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+            }}
+          >
             {/* Header */}
             <div style={{
               padding: '15px 16px', borderBottom: `1px solid ${t.border}`,
@@ -1070,18 +1172,33 @@ export default function DrivePage() {
               }}>
                 <FolderIcon size={14} /> MY DRIVE
               </span>
-              <button
-                onClick={() => loadMyDrive(currentFolderId)}
-                title="Refresh"
-                style={{
-                  background: 'none', border: 'none', cursor: 'pointer',
-                  padding: '6px', borderRadius: '8px',
-                  color: t.textSecondary,
-                  animation: myDriveLoading ? 'spin 1s linear infinite' : 'none',
-                }}
-              >
-                <RotateCw size={13} />
-              </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <button
+                  onClick={() => loadMyDrive(currentFolderId)}
+                  title="Refresh"
+                  style={{
+                    background: 'none', border: 'none', cursor: 'pointer',
+                    padding: '6px', borderRadius: '8px',
+                    color: t.textSecondary,
+                    animation: myDriveLoading ? 'spin 1s linear infinite' : 'none',
+                  }}
+                >
+                  <RotateCw size={13} />
+                </button>
+                <button
+                  className="mobile-sidebar-close"
+                  onClick={() => setMobileSidebarOpen(false)}
+                  title="Close sidebar"
+                  style={{
+                    background: 'none', border: 'none', cursor: 'pointer',
+                    padding: '6px', borderRadius: '8px',
+                    color: t.textSecondary,
+                    alignItems: 'center', justifyContent: 'center',
+                  }}
+                >
+                  <X size={14} />
+                </button>
+              </div>
             </div>
 
             {/* Sidebar folder label */}
@@ -1201,13 +1318,16 @@ export default function DrivePage() {
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
             {/* Top bar */}
-            <div style={{
-              padding: '10px 20px', borderBottom: `1px solid ${t.border}`,
-              background: t.bgTopbar, backdropFilter: 'blur(18px)',
-              display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px',
-              position: 'sticky', top: 0, zIndex: 20,
-              transition: 'background 0.2s, border-color 0.2s',
-            }}>
+            <div
+              className="drive-topbar"
+              style={{
+                padding: '10px 20px', borderBottom: `1px solid ${t.border}`,
+                background: t.bgTopbar, backdropFilter: 'blur(18px)',
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px',
+                position: 'sticky', top: 0, zIndex: 20,
+                transition: 'background 0.2s, border-color 0.2s',
+              }}
+            >
               {/* Breadcrumb — shows Home > My Drive > FolderName */}
               <div style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '13px', fontWeight: 500, flexShrink: 0, flexWrap: 'wrap' }}>
                 <Home
@@ -1240,7 +1360,7 @@ export default function DrivePage() {
               </div>
 
               {/* Search bar */}
-              <div style={{ position: 'relative', width: '280px' }}>
+              <div className="drive-topbar-search" style={{ position: 'relative', width: '280px' }}>
                 <Search size={14} style={{
                   position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)',
                   color: searchQuery ? '#F95F9E' : t.textMuted,
@@ -1341,13 +1461,15 @@ export default function DrivePage() {
                             onMouseEnter={e => { e.currentTarget.style.borderColor = 'rgba(249,95,158,0.4)'; e.currentTarget.style.background = t.folderHov; }}
                             onMouseLeave={e => { e.currentTarget.style.borderColor = t.border; e.currentTarget.style.background = t.bgSecondary; }}
                           >
-                            <FolderIcon size={18} style={{ color: '#F95F9E', flexShrink: 0 }} />
-                            <span style={{
-                              fontSize: '13px', fontWeight: 500, color: t.textPrimary,
-                              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                            }}>
-                              {folder.name}
-                            </span>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1, minWidth: 0 }}>
+                              <FolderIcon size={18} style={{ color: '#F95F9E', flexShrink: 0 }} />
+                              <span style={{
+                                fontSize: '13px', fontWeight: 500, color: t.textPrimary,
+                                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                              }}>
+                                {folder.name}
+                              </span>
+                            </div>
                           </div>
                         ))}
                       </div>
@@ -1372,6 +1494,10 @@ export default function DrivePage() {
                             file={file}
                             searchQuery={searchQuery}
                             theme={t}
+                            indexedDriveFileIds={indexedDriveFileIds}
+                            backgroundDocuments={backgroundDocuments}
+                            indexDriveFile={indexDriveFile}
+                            retryDriveFileIndex={retryDriveFileIndex}
                           />
                         ))}
                       </div>
@@ -1501,6 +1627,10 @@ export default function DrivePage() {
                           file={file}
                           searchQuery={searchQuery}
                           theme={t}
+                          indexedDriveFileIds={indexedDriveFileIds}
+                          backgroundDocuments={backgroundDocuments}
+                          indexDriveFile={indexDriveFile}
+                          retryDriveFileIndex={retryDriveFileIndex}
                         />
                       ))}
                     </div>

@@ -217,6 +217,11 @@ export const driveAPI = {
     return response.data;
   },
 
+  startMyScan: async () => {
+    const response = await api.post('/api/drive/my-scan');
+    return response.data;
+  },
+
   getScanStatus: async (jobId) => {
     const response = await api.get(`/api/drive/scan/${jobId}`);
     return response.data;
