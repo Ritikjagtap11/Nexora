@@ -97,7 +97,7 @@ class LLMService:
         if self.rotator.total_keys > 0:
             logger.info(f"✓ Gemini ready — {self.rotator.total_keys} key(s).")
         else:
-            logger.warning("✗ No Gemini keys — Ollama only.")
+            logger.warning("✗ No Gemini keys configured.")
 
     # ── Public: generate_response_stream ───────────────────────────────
     def generate_response_stream(
@@ -106,7 +106,7 @@ class LLMService:
         search_results: List[Tuple[str, dict, float]],
         conversation_history: List[dict] = None,
     ) -> Generator[Tuple[str, str], None, None]:
-        """Yields (chunk, provider). Gemini first, Ollama fallback."""
+        """Yields (chunk, provider) using rotating Gemini keys."""
 
         from collections import defaultdict
         doc_chunks: dict = defaultdict(list)
@@ -132,7 +132,6 @@ class LLMService:
             for _ in range(self.rotator.total_keys + 1):
                 key = self.rotator.get_available_key()
                 if not key:
-                    logger.warning("No Gemini key available — going to Ollama.")
                     break
                 try:
                     gen = self._generate_gemini_stream(
@@ -159,8 +158,8 @@ class LLMService:
                         continue
                     else:
                         self.last_switch_reason = f"Gemini error: {e}"
-                        logger.warning(f"⚠️ Gemini failed ({e}) — switching to Ollama.")
-                        break
+                        logger.warning(f"⚠️ Gemini key error ({e}).")
+                        continue
 
         raise Exception(
             "No Gemini keys are currently available. All keys are on cooldown or exhausted. "

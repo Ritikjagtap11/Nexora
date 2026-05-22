@@ -48,7 +48,8 @@ export default function Signup() {
       const token = await user.getIdToken()
       
       // Step 4: Create session with backend
-      await fetch('http://localhost:8000/auth/session', {
+      const baseUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+      await fetch(`${baseUrl}/auth/session`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

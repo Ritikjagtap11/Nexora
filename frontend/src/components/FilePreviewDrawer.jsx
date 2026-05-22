@@ -137,7 +137,7 @@ export default function FilePreviewDrawer({ isOpen, onClose, file, onAskAI }) {
 
       <div className="p-4 border-t border-gray-200 dark:border-white/10 space-y-2 bg-gray-50 dark:bg-background-dark">
         <a 
-          href={`http://localhost:8000/api/drive/files/${file.id}/download`} 
+          href={`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/api/drive/files/${file.id}/download`} 
           className="w-full flex items-center justify-center gap-2 py-2 px-4 bg-white dark:bg-white/10 border border-gray-300 dark:border-white/20 text-gray-700 dark:text-white rounded-lg hover:bg-gray-50 dark:hover:bg-white/20 transition-colors font-medium text-sm"
         >
           <Download size={16} /> Download

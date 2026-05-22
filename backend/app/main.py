@@ -4,6 +4,7 @@ load_dotenv()
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+from app.config import settings
 from app.routes import documents, chat, auth, llm_status, drive
 from app.database import connect_to_firebase
 from app.suggested_questions import router as suggested_questions_router  # ← import only
@@ -29,9 +30,16 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+origins = ["http://localhost:5173", "http://localhost:3000"]
+if settings.FRONTEND_URL:
+    for url in settings.FRONTEND_URL.split(","):
+        clean_url = url.strip()
+        if clean_url and clean_url not in origins:
+            origins.append(clean_url)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

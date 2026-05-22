@@ -145,7 +145,7 @@ async def chat(
                     first_doc_id = did
                     break
 
-            # Parse response — both Gemini and Ollama go through parse_llm_json.
+            # Parse response — goes through parse_llm_json.
             # Returns None when LLM returned plain markdown instead of JSON.
             parsed = parse_llm_json(full_response)
             if parsed is None or not parsed.get("answer"):

@@ -1,200 +1,216 @@
-# NEXORA
+# 🌌 NEXORA: Enterprise-Grade AI Document Intelligence SaaS
 
-> AI-Powered Intelligent Document Retrieval System — Upload documents, ask questions in natural language, and get accurate answers with source citations.
-
----
-
-## 🧠 About
-
-**NEXORA** is a full-stack Retrieval-Augmented Generation (RAG) application that allows users to upload PDF and text documents, then query them using natural language. The system uses vector similarity search and Large Language Models to provide accurate, citation-backed answers.
-
-### Who It's For
-- Students researching across multiple documents
-- Professionals needing quick answers from large document sets
-- Teams managing shared document knowledge bases
-
-### Key Features
-- 📄 **Document Upload** — PDF and TXT files with configurable page ranges (up to 500 pages, 75MB)
-- 💬 **AI-Powered Chat** — Natural language Q&A with streaming responses
-- 📍 **Source Citations** — Every answer links back to exact document sources
-- 🔍 **Vector Search** — FAISS-based semantic similarity for instant retrieval
-- ☁️ **Google Drive Integration** — Browse, upload, scan, and index Drive files
-- 📦 **Cloudinary Storage** — Cloud-based document storage and retrieval
-- 🔐 **Firebase Auth** — Email/password and Google OAuth sign-in
-- 💾 **Chat History** — Persistent conversation storage in Firestore
-- 📱 **PWA Support** — Installable as a Progressive Web App
-- 🌙 **Dark/Light Mode** — System-aware theme with manual toggle
-- 📑 **PDF Export** — Export chat conversations to PDF
-- 🔑 **Multi-Key Rotation** — Round-robin Gemini API key rotation (up to 5 keys)
+> Nexora is a premium MERN/FastAPI Retrieval-Augmented Generation (RAG) SaaS platform. Connect personal Google Drives dynamically, browse metadata-only file structures, lazily index supported documents, and chat with files utilizing round-robin Gemini API key rotation, Firebase Admin security, and Cloudinary storage.
 
 ---
 
-## 🏗️ Tech Stack
+## 🧠 System Architecture
 
-### Frontend
-| Technology | Version | Purpose |
-|---|---|---|
-| React | ^19.2.0 | UI component framework |
-| Vite | ^7.2.4 | Build tool & dev server |
-| Tailwind CSS | ^4.2.4 | Utility-first styling |
-| React Router DOM | ^7.14.2 | Client-side routing |
-| Firebase (Client) | ^12.12.1 | Authentication & Firestore |
-| Axios | ^1.13.3 | HTTP client |
-| Lucide React | ^0.563.0 | Icon library |
-| React PDF | ^10.4.1 | PDF rendering |
-| React Markdown | ^10.1.0 | Markdown rendering in chat |
-| jsPDF | ^4.2.1 | PDF export |
-| Vite Plugin PWA | ^1.2.0 | Progressive Web App support |
+Nexora utilizes a highly decoupled, modern service architecture engineered for high speed, low memory utilization, and complete resilience.
 
-### Backend
-| Technology | Version | Purpose |
-|---|---|---|
-| Python | 3.11+ | Runtime |
-| FastAPI | 0.115.5 | REST API framework |
-| Uvicorn | 0.32.1 | ASGI server |
-| Firebase Admin | 7.4.0 | Auth verification & Firestore |
-| FAISS CPU | 1.9.0 | Vector similarity search |
-| Sentence Transformers | 3.3.1 | Text embedding generation |
-| Google Generative AI | 0.8.3 | Gemini LLM integration |
-| PyPDF2 | 3.0.1 | PDF text extraction |
-| python-docx | 1.2.0 | DOCX file support |
-| python-pptx | 1.0.2 | PPTX file support |
-| Cloudinary | latest | Cloud document storage |
-| Google API Client | 2.194.0 | Google Drive API |
-| PyTorch | 2.11.0 | ML model runtime |
+```mermaid
+graph TD
+    subgraph Client [React SPA client]
+        A[Dashboard & Explorer]
+        B[Lightweight Drive Explorer]
+        C[Chat Workspace]
+    end
 
-### Infrastructure
-| Technology | Purpose |
-|---|---|
-| Firebase Firestore | NoSQL database (users, documents, chat history) |
-| Firebase Auth | Authentication (email/password, Google OAuth) |
-| Cloudinary | Cloud media/document storage |
-| Google Drive API | Drive file management & indexing |
-| Google Gemini API | LLM for answer generation |
+    subgraph Authentication
+        Auth[Firebase Client Auth] -->|JWT Bearer Token| Gateway[FastAPI Backend]
+    end
+
+    subgraph Dynamic API Gateway [FastAPI & Pydantic Config]
+        Gateway -->|Verify Token| DB[(Firestore NoSQL)]
+        Gateway -->|Retrieve Assets| Cloudinary[Cloudinary Storage]
+        Gateway -->|Fetch Metadata| Drive[Google Drive API]
+    end
+
+    subgraph RAG & AI Core
+        Gateway -->|Load Embeddings| FAISS[FAISS CPU Vector Store]
+        Gateway -->|Key Rotation Rotator| Gemini[Google Gemini 2.5 Flash]
+    end
+
+    C -->|1. Request Indexing| Gateway
+    Gateway -->|2. Lazy Embed / Ingest| FAISS
+    Gateway -->|3. Rotating LLM Chat| Gemini
+```
 
 ---
 
-## 📁 Project Structure
+## ✨ Features
+
+- 📑 **Dynamic Google Drive Integration:** Dynamic, user-specific OAuth 2.0 flow. Browse and search personal Google Drive folders instantly.
+- ⚡ **Lightweight Directory Scanning:** High-performance, metadata-only directory scanning traversal. No heavy file downloading or vector ingestion occurs during scanning, preventing SSL socket collisions.
+- 💬 **Context-Grounded RAG Chat:** Ask questions in plain English and receive responses grounded in your document snippets with exact inline page citations.
+- 🔮 **Lazy Indexing Sidebar Panel:** Document ingestion is isolated to the Chat Sidebar Drive panel. Index documents (`PDF`, `DOCX`, `TXT`) only when you select them to start a conversation.
+- 🔑 **Multi-Key Rotating Gemini Core:** Round-robin rotate through up to 5 Google Gemini API keys to balance quota ceilings and avoid `429 Rate Limit` blockages.
+- ☁️ **Decoupled Document Ingestion:** Uses PyPDF2 and python-docx to process document structures, generate text embeddings, and index text chunks using **FAISS CPU**.
+- 🔒 **SaaS-Grade Session Security:** Full Firebase Admin Auth verification of JWT bearer tokens on all backend routing middleware.
+- 💾 **Firestore Chat Sessions:** Real-time persistence of your conversations and indexed file records.
+- 🌙 **Modern Glassmorphic UI:** Smooth pink gradients (`#F95F9E`) with responsive Dark Mode toggling and Progressive Web App (PWA) configurations.
+
+---
+
+## 🏗️ Technical Stack
+
+### Frontend Client
+- **React 19 & Vite 7** — High-performance rendering engine and ultra-fast hot modules.
+- **Tailwind CSS** — Glassmorphic token design with customized accent glow structures.
+- **React Router DOM** — Clean, client-side single page app routing.
+- **Firebase SDK** — Seamless user registration and secure Google sign-in.
+- **Axios & Event-Stream** — Robust HTTP communication and streaming SSE response support.
+- **React Markdown & GFM** — Rich syntax highlighting and professional mathematical markdown rendering.
+
+### Backend Services
+- **FastAPI (Python 3.11+)** — Asynchronous web routing, Dependency Injection, and speed.
+- **Firebase Admin SDK** — Verification of secure user identities and direct Firestore operations.
+- **FAISS CPU & Sentence Transformers** — Local high-density vector similarity mapping and embedding searches.
+- **Google API Client** — Dynamic OAuth token refresh cycles and Drive traversal.
+- **Cloudinary SDK** — Safe cloud storage for uploads and temporary file cache management.
+
+---
+
+## 📁 Repository Directory Map
 
 ```
 NEXORA/
-├── backend/                          # Python FastAPI backend
+├── backend/                          # FastAPI Backend
 │   ├── app/
-│   │   ├── main.py                   # FastAPI entry point, CORS, routers
-│   │   ├── config.py                 # Pydantic settings (env vars)
-│   │   ├── database.py               # Firebase Admin initialization
-│   │   ├── models.py                 # Pydantic request/response models
-│   │   ├── suggested_questions.py    # AI question suggestions
-│   │   ├── auth/deps.py             # Auth dependency (token verify)
-│   │   ├── routes/                   # API route handlers
-│   │   ├── services/                 # Business logic layer
-│   │   └── utils/                    # Utility functions
-│   ├── .env.example                  # Env template with placeholders
-│   └── requirements.txt              # Python dependencies
+│   │   ├── main.py                   # App entry, CORS, and lifespan
+│   │   ├── config.py                 # Pydantic BaseSettings loader
+│   │   ├── database.py               # Firebase Admin Connection
+│   │   ├── models.py                 # Pydantic Schema validations
+│   │   ├── suggested_questions.py    # Gemini suggested prompt generator
+│   │   ├── auth/deps.py             # Middleware identity provider
+│   │   ├── routes/                   # Router endpoints (chat, documents, drive, auth)
+│   │   └── services/                 # Engine layers (llm, drive, embedding)
+│   ├── .env.example                  # Backend environmental templates
+│   └── requirements.txt              # Backend runtime packages
 │
-├── frontend/                         # React + Vite frontend
-│   ├── public/assets/                # Static images (logos, team)
+├── frontend/                         # React Frontend SPA
 │   ├── src/
-│   │   ├── components/               # Reusable UI components
-│   │   ├── context/                  # React context providers
-│   │   ├── pages/                    # Route page components
-│   │   └── services/                 # API client & Firebase config
-│   ├── package.json                  # Node.js dependencies
-│   └── vite.config.js                # Vite + PWA configuration
+│   │   ├── components/               # Chat interfaces & document lists
+│   │   ├── context/                  # React state handlers (Auth, Theme)
+│   │   ├── pages/                    # Views (Dashboard, Drive, Login)
+│   │   └── services/                 # API connection configurations
+│   ├── .env.example                  # Frontend environmental templates
+│   └── package.json                  # Frontend packages
 │
-├── .gitignore
-├── README.md
-└── SETUP_GUIDE.txt
+├── render.yaml                       # Render multi-service infrastructure setup
+├── README.md                         # Product information manual
+└── SETUP_GUIDE.txt                   # Deployment execution steps
 ```
 
 ---
 
 ## ⚙️ Environment Variables
 
-All environment variables are defined in `backend/.env`. Copy from `backend/.env.example`.
+### Frontend Setup (`frontend/.env`)
+Create a `.env` file under `frontend/` using `frontend/.env.example` as a guideline:
+```env
+VITE_API_URL=https://your-nexora-backend.onrender.com
+VITE_FIREBASE_API_KEY=AIzaSy...
+VITE_FIREBASE_AUTH_DOMAIN=nexora-xxxxx.firebaseapp.com
+VITE_FIREBASE_PROJECT_ID=nexora-xxxxx
+VITE_GOOGLE_CLIENT_ID=xxxxxxxx-xxxxxx.apps.googleusercontent.com
+```
 
-| Variable | Required | Description | Example Value |
-|---|---|---|---|
-| `GEMINI_API_KEY_1` | ✅ Yes | Primary Gemini API key | `AIzaSy...` |
-| `GEMINI_API_KEY_2` to `_5` | ⚠️ Optional | Additional Gemini keys (round-robin) | `AIzaSy...` |
-| `FIREBASE_SERVICE_ACCOUNT_PATH` | ✅ Yes | Path to Firebase SA JSON | `./firebase-service-account.json` |
-| `UPLOAD_DIR` | ✅ Yes | Temp upload directory | `uploads` |
-| `VECTORSTORE_DIR` | ✅ Yes | FAISS index directory | `vectorstore` |
-| `MAX_UPLOAD_SIZE` | ✅ Yes | Max upload size (bytes) | `10485760` |
-| `CHUNK_SIZE` | ✅ Yes | Text chunk size | `1000` |
-| `CHUNK_OVERLAP` | ✅ Yes | Chunk overlap | `200` |
-| `GOOGLE_SERVICE_ACCOUNT_PATH` | ✅ Yes | Google Cloud SA JSON path | `./google-service-account.json` |
-| `GOOGLE_DRIVE_ROOT_FOLDER_ID` | ✅ Yes | Root Drive folder ID | `1aBcDeFg...` |
-| `GOOGLE_SERVICE_ACCOUNT_EMAIL` | ✅ Yes | Service account email | `sa@project.iam.gserviceaccount.com` |
-| `GOOGLE_CLIENT_ID` | ⚠️ Optional | OAuth client ID | `123...apps.googleusercontent.com` |
-| `GOOGLE_CLIENT_SECRET` | ⚠️ Optional | OAuth client secret | `GOCSPX-...` |
-| `GOOGLE_REDIRECT_URI` | ⚠️ Optional | OAuth redirect URI | `http://localhost:8000/api/drive/callback` |
-| `CLOUDINARY_CLOUD_NAME` | ✅ Yes | Cloudinary cloud name | `dxxxxxxxx` |
-| `CLOUDINARY_API_KEY` | ✅ Yes | Cloudinary API key | `123456789012345` |
-| `CLOUDINARY_API_SECRET` | ✅ Yes | Cloudinary API secret | `aBcDeFg...` |
-
----
-
-## 🚀 Quick Start
-
-```bash
-# 1. Clone the repository
-git clone <repo-url> && cd NEXORA
-
-# 2. Backend setup
-cd backend
-python -m venv venv
-venv\Scripts\Activate.ps1        # Windows
-pip install -r requirements.txt
-cp .env.example .env             # Then edit with real values
-
-# 3. Start backend
-uvicorn app.main:app --reload --port 8000
-
-# 4. Frontend setup (new terminal)
-cd frontend
-npm install
-npm run dev
-
-# 5. Open → http://localhost:5173
+### Backend Setup (`backend/.env`)
+Create a `.env` file under `backend/` using `backend/.env.example` as a guideline:
+```env
+GEMINI_API_KEY_1=AIzaSyPrimary...
+GEMINI_API_KEY_2=AIzaSyBackup1...
+# Add up to GEMINI_API_KEY_5 to enable key rotation
+FIREBASE_PROJECT_ID=nexora-xxxxx
+FIREBASE_SERVICE_ACCOUNT_PATH=./firebase-service-account.json
+GOOGLE_CLIENT_ID=xxxxxxxx-xxxxxx.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=GOCSPX-xxxxxxxxxxxxxx
+GOOGLE_REDIRECT_URI=https://your-nexora-backend.onrender.com/api/drive/oauth/callback
+FRONTEND_URL=https://your-nexora-frontend.onrender.com
+CLOUDINARY_CLOUD_NAME=your_cloudinary_name
+CLOUDINARY_API_KEY=xxxxxxxxxxxxxx
+CLOUDINARY_API_SECRET=xxxxxxxxxxxxxx
 ```
 
 ---
 
-## 🧪 Running Tests
+## 🛠️ Infrastructure Services Installation Setup
 
-```bash
-# Backend health check
-curl http://localhost:8000/health
+### 1. Firebase Configuration
+1. Go to [Firebase Console](https://console.firebase.google.com/) and click **Add Project**.
+2. Enable **Email/Password** and **Google Sign-In** under **Authentication -> Sign-in method**.
+3. Under **Project Settings -> General**, scroll down to your apps and create a **Web App** to obtain your Client credentials (`VITE_FIREBASE_...`).
+4. Under **Project Settings -> Service Accounts**, click **Generate New Private Key**. Save the JSON file as `firebase-service-account.json` inside the `backend/` directory.
 
-# Swagger API docs → http://localhost:8000/docs
+### 2. Google Drive OAuth API Setup
+1. Go to [Google Cloud Console](https://console.cloud.google.com/).
+2. Create a project and enable the **Google Drive API**.
+3. Configure the **OAuth Consent Screen** for **External** users, adding `email` and `profile` scopes.
+4. Under **Credentials**, click **Create Credentials -> OAuth Client ID** select **Web Application**.
+5. Add **Authorized JavaScript Origins**:
+   - `http://localhost:5173` (Local development)
+   - `https://your-nexora-frontend.onrender.com` (Production)
+6. Add **Authorized Redirect URIs**:
+   - `http://localhost:8000/api/drive/oauth/callback` (Local development)
+   - `https://your-nexora-backend.onrender.com/api/drive/oauth/callback` (Production)
+7. Save the resulting **Client ID** and **Client Secret**.
 
-# Frontend lint
-cd frontend && npm run lint
+### 3. Cloudinary Setup
+1. Register a free account at [Cloudinary](https://cloudinary.com/).
+2. Open your Cloudinary Dashboard and locate your **Cloud Name**, **API Key**, and **API Secret**.
+
+---
+
+## 🚀 Render Production Deployment Guide
+
+Deploy the entire stack instantly on Render by using the root-level [render.yaml](file:///c:/LAPO-R/BE-Project's/Nexora/render.yaml) blueprint config.
+
+### 💾 Persistent Storage Requirements
+> [!IMPORTANT]
+> Because Nexora uses local FAISS indexes inside `backend/vectorstore`, a **Persistent Disk** is required on Render. Without it, your indexed document databases will be lost every time the backend container restarts or builds. 
+> 
+> The [render.yaml](file:///c:/LAPO-R/BE-Project's/Nexora/render.yaml) file automatically provisions a **1GB High-Performance Volume** mounted directly at `/opt/render/project/src/backend/vectorstore` to guarantee complete index persistence.
+
+### Step-by-Step Deploy Instructions
+1. Push your Nexora project repository to **GitHub**.
+2. Log into the **Render Dashboard** and click **Blueprints -> New Blueprint Instance**.
+3. Connect your connected GitHub repository.
+4. Render will auto-detect `render.yaml` and prompt you for the required production environment variables.
+5. Fill in the variables (ensuring your `firebase-service-account.json` credentials content matches).
+6. Click **Approve & Deploy**. 
+
+---
+
+## 📍 Google Drive Indexing Flow Architecture
+
+```
+User enters Workspace
+   └── Browse Google Drive metadata (Lightweight API list)
+          └── Highlight supported extensions (PDF, DOCX, TXT badge)
+                 └── Select indexable file in Chat Sidebar Panel
+                        └── Check: Is it in FAISS vector store?
+                               ├── YES: Prompt AI using rotating Gemini keys
+                               └── NO: Fetch binary stream -> Parse -> Chunk -> Embed -> Save to FAISS -> Chat
 ```
 
 ---
 
-## 📦 Build & Deploy
+## 📸 Interface Placeholders
 
-```bash
-# Production build
-cd frontend && npm run build    # Output: frontend/dist/
-npm run preview                  # Preview locally
-```
-
-**Deploy Options:**
-- **Vercel** (frontend) + **Railway/Render** (backend) — set env vars in dashboards
-- **VPS/Docker** — serve `dist/` with nginx, run backend with uvicorn
+*Include gorgeous visual screenshots here representing your system flow:*
+- **[Dashboard Preview]** - *A dynamic overview of your files, active AI provider, and storage statistics.*
+- **[Google Drive Page]** - *Browse your personal Google Drive in a dark glassmorphic grid.*
+- **[Interactive AI Chat]** - *AI Chat utilizing multiple source-citation badges, suggestions, and conversation histories.*
 
 ---
 
-## 🤝 Contributing
+## 🛠️ Troubleshooting
 
-- **Branches:** `feature/<name>`, `fix/<name>`, `refactor/<name>`
-- **Commits:** `feat: description`, `fix: description`, `docs: description`
-- **PRs:** Fork → branch from `main` → test locally → submit with clear description
+- **OAuth Callback failing in production?** Check that the **Authorized Redirect URIs** in Google Cloud Credentials precisely match your dynamic `GOOGLE_REDIRECT_URI` environment variable, and that `FRONTEND_URL` is set to the frontend address.
+- **Vectors are missing after redeployment?** Ensure the `vectorstore-disk` is correctly mounted at `/opt/render/project/src/backend/vectorstore` in your Render Web Service.
+- **Cloudinary uploads failing?** Double check that your Cloudinary credentials do not contain extra whitespace in your environmental variables.
 
 ---
 
-*Built with ❤️ using React, FastAPI, Firebase, and Google Gemini AI*
+*Nexora — Built with ❤️ for professional document intelligence.*

@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     # ── Application ─────────────────────────────────────────────────────
     UPLOAD_DIR: str = "uploads"
     VECTORSTORE_DIR: str = "vectorstore"
+    FRONTEND_URL: str = ""
     MAX_UPLOAD_SIZE: int = 10485760
     CHUNK_SIZE: int = 1000
     CHUNK_OVERLAP: int = 200

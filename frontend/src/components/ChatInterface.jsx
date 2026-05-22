@@ -44,7 +44,6 @@ const getCasualReply = () => casualReplies[Math.floor(Math.random() * casualRepl
 const getProviderIcon = (provider) => {
   switch (provider) {
     case 'gemini': return <Sparkles size={12} className="text-blue-400" />;
-    case 'ollama': return <Cpu size={12} className="text-emerald-400" />;
     default: return null;
   }
 };
@@ -52,7 +51,6 @@ const getProviderIcon = (provider) => {
 const getProviderName = (provider) => {
   switch (provider) {
     case 'gemini': return 'Gemini';
-    case 'ollama': return 'Ollama';
     default: return provider || '';
   }
 };

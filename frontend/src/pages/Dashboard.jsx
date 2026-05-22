@@ -346,7 +346,6 @@ const latestDocs = filteredDocs.slice(0, 3);
 
   const getActiveAIProvider = () => {
     if (llmStatus?.gemini?.configured_keys > 0) return { name: 'Gemini 1.5 Pro', icon: <Sparkles size={12} className="text-white" />, color: 'bg-emerald-500' };
-    if (llmStatus?.ollama?.available) return { name: 'Ollama Active', icon: <Cpu size={12} className="text-white" />, color: 'bg-emerald-500' };
     return { name: 'AI Standby', icon: <CheckCircle2 size={12} className="text-white" />, color: 'bg-gray-400' };
   };
 

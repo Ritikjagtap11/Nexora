@@ -70,7 +70,7 @@ async def get_suggested_questions(
 
 
 async def _generate_questions(context: str, conversation_history: List[dict] = []) -> List[str]:
-    """Generate 4 short questions. Tries Gemini, then Ollama, then fallback."""
+    """Generate 4 short questions using Gemini."""
 
     SYSTEM = (
         "You generate exactly 4 short, highly relevant, and unique follow-up questions a user would naturally ask next about the documents, "
@@ -91,7 +91,7 @@ async def _generate_questions(context: str, conversation_history: List[dict] = [
 
     PROMPT = f"Document excerpts:\n{context}\n{history_str}\n\nBased on the document excerpts and conversation history, generate 4 unique next suggested questions for the user to explore the documents further:"
 
-    # Try Gemini first
+    # Try Gemini
     try:
         from app.services.llm_service import llm_service
         import google.generativeai as genai
@@ -111,33 +111,5 @@ async def _generate_questions(context: str, conversation_history: List[dict] = [
                 return [str(q) for q in questions[:4]]
     except Exception as e:
         logger.warning(f"Gemini question generation failed: {e}")
-
-    # Ollama fallback
-    try:
-        import httpx
-
-        payload = {
-            "model": "llama3.2:1b",
-            "messages": [
-                {"role": "system", "content": SYSTEM},
-                {"role": "user",   "content": PROMPT},
-            ],
-            "stream": False,
-            "options": {"temperature": 0.2, "num_predict": 256},
-        }
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.post(
-                "http://localhost:11434/api/chat",
-                json=payload,
-            )
-        if resp.status_code == 200:
-            raw = resp.json()["message"]["content"].strip()
-            raw = raw.replace("```json", "").replace("```", "").strip()
-            data = json.loads(raw)
-            questions = data.get("questions", [])
-            if isinstance(questions, list) and len(questions) >= 1:
-                return [str(q) for q in questions[:4]]
-    except Exception as e:
-        logger.warning(f"Ollama question generation failed: {e}")
 
     return []

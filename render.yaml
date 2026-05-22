@@ -1,0 +1,77 @@
+# ════════════════════════════════════════════════════════════════════════════════
+# NEXORA — Render Infrastructure Blueprint Specification
+# ════════════════════════════════════════════════════════════════════════════════
+# This file lets you deploy Nexora's entire full-stack system with a single click.
+
+services:
+  # ── Python FastAPI Backend Service ──────────────────────────────────────────
+  - type: web
+    name: nexora-backend
+    env: python
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: GEMINI_API_KEY_1
+        sync: false
+      - key: GEMINI_API_KEY_2
+        sync: false
+      - key: GEMINI_API_KEY_3
+        sync: false
+      - key: GEMINI_API_KEY_4
+        sync: false
+      - key: GEMINI_API_KEY_5
+        sync: false
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_SERVICE_ACCOUNT_PATH
+        value: ./firebase-service-account.json
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REDIRECT_URI
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+      - key: UPLOAD_DIR
+        value: uploads
+      - key: VECTORSTORE_DIR
+        value: vectorstore
+
+    # ── Persistent Storage Disk Mount (For Local FAISS Vectors) ───────────────
+    # Mounts a high-performance disk to prevent vector loss when container cycles.
+    disk:
+      name: vectorstore-disk
+      mountPath: backend/vectorstore
+      sizeGB: 1
+
+  # ── React Static Frontend Client ────────────────────────────────────────────
+  - type: web
+    name: nexora-frontend
+    env: static
+    buildCommand: cd frontend && npm install && npm run build
+    publishDir: frontend/dist
+    envVars:
+      - key: VITE_API_URL
+        sync: false
+      - key: VITE_FIREBASE_API_KEY
+        sync: false
+      - key: VITE_FIREBASE_AUTH_DOMAIN
+        sync: false
+      - key: VITE_FIREBASE_PROJECT_ID
+        sync: false
+      - key: VITE_GOOGLE_CLIENT_ID
+        sync: false
+
+    # ── Client Routing Rewrite Rules ──────────────────────────────────────────
+    # Redirects all traffic to index.html to support React Router client-side routing.
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html

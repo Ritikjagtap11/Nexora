@@ -231,12 +231,14 @@ async def drive_oauth_callback(code: str, state: str):
         }, merge=True)
         logger.info(f"[OAUTH] Drive connected for user: {uid}")
         # Redirect user back to frontend Drive page
-        frontend_url = settings.GOOGLE_REDIRECT_URI.split("/api/")[0]
-        if "127.0.0.1:8000" in frontend_url:
-            frontend_url = frontend_url.replace("127.0.0.1:8000", "localhost:5173")
-        elif "localhost:8000" in frontend_url:
-            frontend_url = frontend_url.replace("localhost:8000", "localhost:5173")
-        return RedirectResponse(url=f"{frontend_url}/app/drive?connected=true")
+        frontend_url = settings.FRONTEND_URL
+        if not frontend_url:
+            frontend_url = settings.GOOGLE_REDIRECT_URI.split("/api/")[0]
+            if "127.0.0.1:8000" in frontend_url:
+                frontend_url = frontend_url.replace("127.0.0.1:8000", "localhost:5173")
+            elif "localhost:8000" in frontend_url:
+                frontend_url = frontend_url.replace("localhost:8000", "localhost:5173")
+        return RedirectResponse(url=f"{frontend_url.rstrip('/')}/app/drive?connected=true")
     except Exception as e:
         logger.error(f"[OAUTH] Callback error: {e}")
         raise HTTPException(status_code=400, detail=f"OAuth failed: {str(e)}")
