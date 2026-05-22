@@ -1,7 +1,27 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { documentAPI, driveAPI } from '../services/api';
+import { useAuth } from './AuthContext';
 
 const BackgroundTasksContext = createContext(null);
+
+const showNativeNotification = (title, options = {}) => {
+  if (!('Notification' in window)) return;
+  
+  const defaultOptions = {
+    icon: '/assets/google-drive.png',
+    ...options
+  };
+
+  if (Notification.permission === 'granted') {
+    new Notification(title, defaultOptions);
+  } else if (Notification.permission !== 'denied') {
+    Notification.requestPermission().then(permission => {
+      if (permission === 'granted') {
+        new Notification(title, defaultOptions);
+      }
+    });
+  }
+};
 
 export function useBackgroundTasks() {
   const context = useContext(BackgroundTasksContext);
@@ -51,7 +71,17 @@ export function BackgroundTasksProvider({ children }) {
   // Connection status cache
   const [driveConnected, setDriveConnected] = useState(false);
 
+  // Centralized My Drive browser state
+  const [myDriveFolders, setMyDriveFolders] = useState([]);
+  const [myDriveFiles, setMyDriveFiles] = useState([]);
+  const [myDriveLoading, setMyDriveLoading] = useState(false);
+  const [myDriveError, setMyDriveError] = useState(null);
+  const [currentFolderId, setCurrentFolderId] = useState('root');
+  const [folderBreadcrumb, setFolderBreadcrumb] = useState([{ id: 'root', name: 'My Drive' }]);
+
   const pollRef = useRef(null);
+  const abortControllerRef = useRef(null);
+  const activePollingJobIdRef = useRef(null);
 
   // Keep backgroundDocuments in sessionStorage
   useEffect(() => {
@@ -98,14 +128,90 @@ export function BackgroundTasksProvider({ children }) {
       setIsPreloadingIndexedIds(false);
     }
   };
+  const { user } = useAuth();
+
+  const checkDriveConnection = async () => {
+    try {
+      const res = await driveAPI.getConnectionStatus();
+      const connected = !!res.connected;
+      setDriveConnected(connected);
+      if (connected) {
+        loadMyDrive('root', 'My Drive');
+      } else {
+        setMyDriveFolders([]);
+        setMyDriveFiles([]);
+      }
+    } catch (err) {
+      setDriveConnected(false);
+      setMyDriveFolders([]);
+      setMyDriveFiles([]);
+    }
+  };
 
   useEffect(() => {
     fetchIndexedDriveFileIds();
-    // Also fetch connection status
-    driveAPI.getConnectionStatus()
-      .then(res => setDriveConnected(!!res.connected))
-      .catch(() => setDriveConnected(false));
   }, []);
+
+  useEffect(() => {
+    if (!user) {
+      setDriveConnected(false);
+      setMyDriveFolders([]);
+      setMyDriveFiles([]);
+      setCurrentFolderId('root');
+      setFolderBreadcrumb([{ id: 'root', name: 'My Drive' }]);
+      setMyDriveLoading(false);
+      setMyDriveError(null);
+      stopDeepScanPolling();
+      setDeepScanState({
+        scanStatus: 'idle',
+        scanProgress: { scanned: 0, total: 0, current_file: '' },
+        scannedFiles: [],
+        scanJobId: null
+      });
+    } else {
+      checkDriveConnection();
+    }
+  }, [user]);
+
+  const prioritizeScanFolder = async (jobId, folderId, folderName) => {
+    try {
+      await driveAPI.prioritizeFolder(jobId, folderId, folderName);
+    } catch (err) {
+      console.error('[PRIORITIZE] Failed to prioritize folder:', err);
+    }
+  };
+
+  const loadMyDrive = async (folderId = 'root', folderName = 'My Drive') => {
+    setMyDriveLoading(true);
+    setMyDriveError(null);
+    try {
+      const data = await driveAPI.listMyDrive(folderId);
+      setMyDriveFolders(data.folders || []);
+      setMyDriveFiles(data.files || []);
+      setCurrentFolderId(folderId);
+      
+      // Prioritize this navigated folder in background deep scan if active
+      if (deepScanState.scanStatus === 'running' && deepScanState.scanJobId) {
+        prioritizeScanFolder(deepScanState.scanJobId, folderId, folderName);
+      }
+    } catch (err) {
+      console.error('My Drive load error in context:', err);
+      const errMsg = err.response?.data?.detail || err.message || 'Failed to load Google Drive files. Please try again.';
+      setMyDriveError(errMsg);
+    } finally {
+      setMyDriveLoading(false);
+    }
+  };
+
+  const handleFolderClick = (folder) => {
+    setFolderBreadcrumb(prev => [...prev, { id: folder.id, name: folder.name }]);
+    loadMyDrive(folder.id, folder.name);
+  };
+
+  const handleBreadcrumbClick = (crumb, index) => {
+    setFolderBreadcrumb(prev => prev.slice(0, index + 1));
+    loadMyDrive(crumb.id, crumb.name);
+  };
 
   // --- Helper: Toast Notification Trigger ---
   const addToast = (message, type = 'success') => {
@@ -340,8 +446,24 @@ export function BackgroundTasksProvider({ children }) {
   };
 
   // --- Public Action: Persistent Deep Scan control ---
+  const stopDeepScanPolling = () => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    activePollingJobIdRef.current = null;
+  };
+
   const startPersistentDeepScan = async () => {
     if (deepScanState.scanStatus === 'running') return;
+
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
 
     setDeepScanState(prev => ({
       ...prev,
@@ -371,47 +493,128 @@ export function BackgroundTasksProvider({ children }) {
   };
 
   const setupDeepScanPolling = (jobId) => {
-    if (pollRef.current) clearInterval(pollRef.current);
+    if (!jobId) return;
+    if (activePollingJobIdRef.current === jobId) {
+      return; // Already polling this jobId, prevent overlapping loops
+    }
 
-    pollRef.current = setInterval(async () => {
+    stopDeepScanPolling(); // stop any active first
+    activePollingJobIdRef.current = jobId;
+
+    // Initialize offset to the length of currently loaded scanned files (e.g. from sessionStorage recovery)
+    let offset = 0;
+    setDeepScanState(prev => {
+      if (prev.scanJobId === jobId) {
+        offset = prev.scannedFiles ? prev.scannedFiles.length : 0;
+      }
+      return prev;
+    });
+
+    const runPoll = async () => {
+      // Ensure we only proceed if this is still the active job being polled
+      if (activePollingJobIdRef.current !== jobId) return;
+
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      abortControllerRef.current = new AbortController();
+
       try {
-        const data = await driveAPI.getScanStatus(jobId);
+        const data = await driveAPI.getScanStatus(jobId, {
+          params: { offset },
+          signal: abortControllerRef.current.signal
+        });
+        
+        // Check once more after the async call completes
+        if (activePollingJobIdRef.current !== jobId) return;
+
         const newFiles = data.files || [];
 
-        setDeepScanState(prev => ({
-          ...prev,
-          scanProgress: {
-            scanned: data.scanned || 0,
-            total: data.total || 0,
-            current_file: data.current_file || ''
-          },
-          scannedFiles: newFiles,
-          scanStatus: data.status // complete | failed | running
-        }));
+        // Map backend statuses: queued | connecting | fetching | scanning | indexing | completed | failed | cancelled
+        let status = 'running';
+        if (data.status === 'completed' || data.status === 'complete') {
+          status = 'complete';
+        } else if (data.status === 'failed') {
+          status = 'failed';
+        } else if (data.status === 'cancelled') {
+          status = 'cancelled';
+        } else if (data.status === 'idle') {
+          status = 'idle';
+        }
 
-        if (data.status === 'complete' || data.status === 'failed') {
-          clearInterval(pollRef.current);
-          pollRef.current = null;
+        setDeepScanState(prev => {
+          if (prev.scanJobId !== jobId) return prev;
+          
+          const updatedScannedFiles = [...prev.scannedFiles, ...newFiles];
+          offset += newFiles.length;
 
-          if (data.status === 'complete') {
+          // If complete, save to session storage
+          if (status === 'complete') {
             try {
-              sessionStorage.setItem('nexora_my_scan_files', JSON.stringify(newFiles));
+              sessionStorage.setItem('nexora_my_scan_files', JSON.stringify(updatedScannedFiles));
               sessionStorage.setItem('nexora_my_scan_status', 'complete');
             } catch (e) {}
-            addToast(`🔍 Deep scan finished! Discovered ${newFiles.length} files.`, 'success');
+          }
+
+          return {
+            ...prev,
+            scanProgress: {
+              scanned: data.scanned || 0,
+              total: data.total || 0,
+              current_file: data.current_file || '',
+              folder_count: data.folder_count || 0,
+              file_count: data.file_count || 0,
+              supported_files_count: data.supported_files_count || 0,
+              indexed_files_count: data.indexed_files_count || 0,
+              progress: data.progress || 0
+            },
+            scannedFiles: updatedScannedFiles,
+            scanStatus: status,
+            backendStatus: data.status
+          };
+        });
+
+        if (data.status === 'completed' || data.status === 'complete' || data.status === 'failed' || data.status === 'cancelled') {
+          stopDeepScanPolling();
+
+          if (data.status === 'completed' || data.status === 'complete') {
+            addToast(`🔍 Deep scan finished! Indexed ${data.indexed_files_count || newFiles.length} files.`, 'success');
+            showNativeNotification('Nexora Update', {
+              body: `🔍 Deep scan finished! Indexed ${data.indexed_files_count || newFiles.length} files.`
+            });
+          } else if (data.status === 'cancelled') {
+            addToast('⚠️ Deep scan was interrupted/cancelled.', 'error');
+            showNativeNotification('Nexora Update', {
+              body: '⚠️ Deep scan was interrupted/cancelled.'
+            });
           } else {
-            addToast('❌ Deep scan was interrupted.', 'error');
+            addToast('❌ Deep scan failed.', 'error');
+            showNativeNotification('Nexora Update', {
+              body: '❌ Deep scan failed.'
+            });
           }
         }
       } catch (err) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-        setDeepScanState(prev => ({
-          ...prev,
-          scanStatus: 'failed'
-        }));
+        if (err.name !== 'CanceledError' && err.name !== 'AbortError') {
+          console.error('Polling error:', err);
+          stopDeepScanPolling();
+          setDeepScanState(prev => ({
+            ...prev,
+            scanStatus: 'failed'
+          }));
+          addToast('❌ Deep scan failed.', 'error');
+          showNativeNotification('Nexora Update', {
+            body: '❌ Deep scan failed.'
+          });
+        }
       }
-    }, 1500);
+    };
+
+    // Execute immediately on the first tick to prevent delay
+    runPoll();
+
+    // Set up the interval
+    pollRef.current = setInterval(runPoll, 2000);
   };
 
   // Re-establish deep scan polling if app is refreshed while scanning
@@ -420,9 +623,7 @@ export function BackgroundTasksProvider({ children }) {
       setupDeepScanPolling(deepScanState.scanJobId);
     }
     return () => {
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-      }
+      stopDeepScanPolling();
     };
   }, [deepScanState.scanJobId]);
 
@@ -435,12 +636,28 @@ export function BackgroundTasksProvider({ children }) {
       toasts,
       driveConnected,
       setDriveConnected,
+      myDriveFolders,
+      setMyDriveFolders,
+      myDriveFiles,
+      setMyDriveFiles,
+      myDriveLoading,
+      myDriveError,
+      currentFolderId,
+      setCurrentFolderId,
+      folderBreadcrumb,
+      setFolderBreadcrumb,
+      loadMyDrive,
+      handleFolderClick,
+      handleBreadcrumbClick,
+      checkDriveConnection,
       uploadAndIndexDocument,
       retryUpload,
       indexDriveFile,
       retryDriveFileIndex,
       indexDriveFolder,
       startPersistentDeepScan,
+      stopDeepScanPolling,
+      prioritizeScanFolder,
       fetchIndexedDriveFileIds
     }}>
       {children}

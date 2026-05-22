@@ -1,12 +1,13 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Send, Bot, User, Sparkles, Cpu, Download, PlusCircle } from 'lucide-react';
+import { Send, Bot, User, Sparkles, Cpu, Download, PlusCircle, Menu } from 'lucide-react';
 import { exportChatToPdf } from '../services/PdfExportService';
 import { chatAPI } from '../services/api';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useChatContext } from '../context/ChatContext';
 import { useDialog } from '../context/DialogContext';
+import { sanitizeStreamingText } from '../services/streamSanitizer';
 
 
 // ── Casual message detection ──────────────────────────────────────────────────
@@ -35,12 +36,7 @@ const casualReplies = [
   "👋 Hi! Go ahead and ask me anything.",
 ];
 
-const DEFAULT_SUGGESTED_QUESTIONS = [
-  "What is this document about?",
-  "Summarize the key points",
-  "What are the main topics covered?",
-  "List the important sections",
-];
+// DEFAULT_SUGGESTED_QUESTIONS removed entirely
 
 const getCasualReply = () => casualReplies[Math.floor(Math.random() * casualReplies.length)];
 
@@ -64,6 +60,7 @@ const getProviderName = (provider) => {
 // ── Markdown renderer ─────────────────────────────────────────────────────────
 const formatText = (text) => {
   if (!text) return null;
+  const sanitized = sanitizeStreamingText(text);
   return (
     <div className="prose dark:prose-invert max-w-none text-sm">
       <ReactMarkdown
@@ -81,7 +78,7 @@ const formatText = (text) => {
           },
         }}
       >
-        {text || ''}
+        {sanitized || ''}
       </ReactMarkdown>
     </div>
   );
@@ -175,16 +172,16 @@ const AssistantMessage = ({
 
         {/* Suggested Next Questions - Shows only after response */}
         {!isStreaming && allSuggestions.length > 0 && onFollowUp && (
-          <div className="mt-4 px-1 w-full">
-            <div className="flex items-center gap-1 text-[10px] text-violet-500 dark:text-violet-400 mb-1.5 font-semibold uppercase tracking-wider">
-              <Sparkles size={9} /> Suggested Next Questions
+          <div className="mt-4 px-1 w-full animate-fade-in">
+            <div className="flex items-center gap-1 text-[10px] text-[#F95F9E] mb-1.5 font-semibold uppercase tracking-wider">
+              <Sparkles size={9} className="text-[#F95F9E] animate-pulse" /> Suggested Next Questions
             </div>
             <div className="flex flex-wrap gap-2">
               {allSuggestions.map((sug, i) => (
                 <button
                   key={i}
                   onClick={() => onFollowUp(sug)}
-                  className="text-left text-sm bg-white dark:bg-white/5 hover:bg-violet-50 dark:hover:bg-violet-900/30 border border-violet-100 dark:border-violet-800 px-4 py-2.5 rounded-2xl text-gray-700 dark:text-gray-200 hover:text-violet-700 transition-all"
+                  className="text-left text-sm bg-white/40 dark:bg-white/5 backdrop-blur-md border border-gray-200 dark:border-white/10 hover:border-[#F95F9E] dark:hover:border-[#F95F9E] px-4 py-2.5 rounded-2xl text-gray-700 dark:text-gray-200 hover:text-[#F95F9E] dark:hover:text-[#F95F9E] hover:bg-[#F95F9E]/10 hover:shadow-[0_0_12px_rgba(249,95,158,0.2)] dark:hover:shadow-[0_0_12px_rgba(249,95,158,0.3)] transition-all duration-300 cursor-pointer"
                 >
                   {sug}
                 </button>
@@ -204,12 +201,12 @@ const AssistantMessage = ({
 };
 
 // ── Main component ────────────────────────────────────────────────────────────
-export default function ChatInterface({ sendMessageRef, loadedSession, onNewChat }) {
+export default function ChatInterface({ sendMessageRef, loadedSession, onNewChat, onToggleSidebar }) {
   const [messages, setMessages] = useState([]);
   const [searchParams] = useSearchParams();
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
-  const [suggestedQuestions, setSuggestedQuestions] = useState(DEFAULT_SUGGESTED_QUESTIONS);
+  const [suggestedQuestions, setSuggestedQuestions] = useState([]);
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
 
   const messagesEndRef = useRef(null);
@@ -265,7 +262,7 @@ export default function ChatInterface({ sendMessageRef, loadedSession, onNewChat
   // Initial suggestions for empty state
   useEffect(() => {
     if (selectedDocs.length === 0) {
-      setSuggestedQuestions(DEFAULT_SUGGESTED_QUESTIONS);
+      setSuggestedQuestions([]);
       return;
     }
     if (messages.length > 0) return;
@@ -276,24 +273,26 @@ export default function ChatInterface({ sendMessageRef, loadedSession, onNewChat
         const result = await chatAPI.getSuggestedQuestions(selectedDocs);
         if (result?.questions?.length > 0) {
           setSuggestedQuestions(result.questions.slice(0, 4));
+        } else {
+          setSuggestedQuestions([]);
         }
       } catch {
-        setSuggestedQuestions(DEFAULT_SUGGESTED_QUESTIONS);
+        setSuggestedQuestions([]);
       } finally {
         setLoadingSuggestions(false);
       }
     };
 
     fetchSuggestions();
-  }, [selectedDocs.join(',')]);
+  }, [selectedDocs.join(','), messages.length]);
 
   // Generate suggestions after response
-  const generateAfterSuggestions = useCallback(async () => {
+  const generateAfterSuggestions = useCallback(async (history = []) => {
     try {
-      const result = await chatAPI.getSuggestedQuestions(selectedDocs);
-      return result?.questions?.length > 0 ? result.questions.slice(0, 4) : DEFAULT_SUGGESTED_QUESTIONS;
+      const result = await chatAPI.getSuggestedQuestions(selectedDocs, history);
+      return result?.questions?.length > 0 ? result.questions.slice(0, 4) : [];
     } catch {
-      return DEFAULT_SUGGESTED_QUESTIONS;
+      return [];
     }
   }, [selectedDocs]);
 
@@ -342,7 +341,7 @@ export default function ChatInterface({ sendMessageRef, loadedSession, onNewChat
 
         (chunk) => {
           responseAccumulatorRef.current += chunk;
-          const currentText = responseAccumulatorRef.current;
+          const currentText = sanitizeStreamingText(responseAccumulatorRef.current);
           setMessages(prev => {
             const updated = [...prev];
             const last = updated[updated.length - 1];
@@ -387,28 +386,27 @@ export default function ChatInterface({ sendMessageRef, loadedSession, onNewChat
     } finally {
       setLoading(false);
 
+      const finalContent = sanitizeStreamingText(responseAccumulatorRef.current);
+
+      // Generate suggested questions based on document chunks and context-aware history
+      const finalAssistantMsg = { role: 'assistant', content: finalContent };
+      const currentFullHistory = [...nextMessages, finalAssistantMsg];
+      const newSuggestions = await generateAfterSuggestions(currentFullHistory);
+
+      let finalMessages = [];
       setMessages(prev => {
         const updated = [...prev];
         const last = updated[updated.length - 1];
         if (last?.role === 'assistant') {
-          updated[updated.length - 1] = { ...last, streaming: false };
+          updated[updated.length - 1] = { ...last, content: finalContent, streaming: false, afterSuggestions: newSuggestions };
         }
+        finalMessages = updated;
         return updated;
       });
 
-      // Generate suggested questions based on document chunks
-      const newSuggestions = await generateAfterSuggestions();
-
-      setMessages(prev => {
-        const updated = [...prev];
-        const last = updated[updated.length - 1];
-        if (last?.role === 'assistant') {
-          updated[updated.length - 1] = { ...last, afterSuggestions: newSuggestions };
-        }
-        return updated;
-      });
-
-      setTimeout(() => saveSession(messages, sessionIdRef.current), 100);
+      setTimeout(() => {
+        saveSession(finalMessages.length > 0 ? finalMessages : messages, sessionIdRef.current);
+      }, 100);
     }
   };
 
@@ -427,33 +425,43 @@ export default function ChatInterface({ sendMessageRef, loadedSession, onNewChat
     <div className="flex-1 flex flex-col h-full w-full overflow-hidden bg-transparent dark:bg-transparent">
 
       {/* Header */}
-      <div className="bg-primary text-white py-3 px-6 shadow-sm z-10 flex flex-wrap gap-2 items-center justify-between shrink-0">
-        <div className="flex items-center gap-2 font-bold text-lg">
-          <Bot size={20} />
-          Chat with Document
+      <div className="bg-primary text-white py-3 px-4 sm:px-6 shadow-sm z-10 flex flex-wrap gap-3 items-center justify-between shrink-0">
+        <div className="flex items-center gap-2 font-bold text-base sm:text-lg min-w-0">
+          <Bot size={20} className="shrink-0" />
+          <span className="truncate">Chat with Document</span>
         </div>
-        <div className="flex items-center gap-2 flex-wrap">
-        <button
-          onClick={() => {
-            try {
-              exportChatToPdf(messages, selectedDocs.length > 0 ? `${selectedDocs.length} document(s)` : 'Document');
-            } catch (err) {
-              dialog.alert('Export failed: ' + err.message);
-            }
-          }}
-          disabled={messages.length === 0}
-          className="flex items-center gap-1.5 px-3.5 py-1.5 text-sm font-medium rounded-full border border-white/40 hover:bg-white/15 disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-200"
-        >
-          <Download size={14} />
-          Export PDF
-        </button>
-        <button
-          onClick={onNewChat}
-          className="flex items-center gap-1.5 px-3.5 py-1.5 text-sm font-medium rounded-full border border-white/40 hover:bg-white/15 transition-all duration-200"
-        >
-          <PlusCircle size={14} />
-          New Chat
-        </button>
+        <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
+          <button
+            onClick={() => {
+              try {
+                exportChatToPdf(messages, selectedDocs.length > 0 ? `${selectedDocs.length} document(s)` : 'Document');
+              } catch (err) {
+                dialog.alert('Export failed: ' + err.message);
+              }
+            }}
+            disabled={messages.length === 0}
+            className="flex items-center justify-center gap-1.5 h-9 px-3 text-xs sm:px-3.5 sm:text-sm font-medium rounded-full border border-white/40 hover:bg-white/15 disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-200"
+          >
+            <Download size={14} className="shrink-0" />
+            <span className="truncate">Export PDF</span>
+          </button>
+          <button
+            onClick={onNewChat}
+            className="flex items-center justify-center gap-1.5 h-9 px-3 text-xs sm:px-3.5 sm:text-sm font-medium rounded-full border border-white/40 hover:bg-white/15 transition-all duration-200"
+          >
+            <PlusCircle size={14} className="shrink-0" />
+            <span className="truncate">New Chat</span>
+          </button>
+          {onToggleSidebar && (
+            <button
+              onClick={onToggleSidebar}
+              className="lg:hidden flex items-center justify-center gap-1.5 h-9 px-3 text-xs sm:px-3.5 sm:text-sm font-medium rounded-full border border-white/40 hover:bg-white/15 transition-all duration-200"
+              aria-label="Toggle Sidebar"
+            >
+              <Menu size={14} className="shrink-0" />
+              <span className="truncate">Menu</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -482,7 +490,7 @@ export default function ChatInterface({ sendMessageRef, loadedSession, onNewChat
                     <button
                       key={i}
                       onClick={() => sendMessage(q)}
-                      className="text-xs bg-white dark:bg-white/5 border border-gray-200 dark:border-white/10 text-gray-600 dark:text-gray-300 px-3 py-2 rounded-xl hover:border-primary hover:text-primary transition-colors shadow-sm"
+                      className="text-xs bg-white/40 dark:bg-white/5 backdrop-blur-md border border-gray-200 dark:border-white/10 hover:border-[#F95F9E] dark:hover:border-[#F95F9E] text-gray-700 dark:text-gray-200 hover:text-[#F95F9E] dark:hover:text-[#F95F9E] hover:bg-[#F95F9E]/10 hover:shadow-[0_0_12px_rgba(249,95,158,0.2)] dark:hover:shadow-[0_0_12px_rgba(249,95,158,0.3)] px-3.5 py-2.5 rounded-xl transition-all duration-300 shadow-sm cursor-pointer"
                     >
                       {q}
                     </button>

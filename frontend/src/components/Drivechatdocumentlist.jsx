@@ -65,11 +65,12 @@ export default function DriveChatDocumentList({ onSuggestedQuestion }) {
     driveConnected,
     startPersistentDeepScan,
     indexedDriveFileIds,
-    fetchIndexedDriveFileIds
+    fetchIndexedDriveFileIds,
+    myDriveFiles,
+    myDriveLoading,
+    loadMyDrive,
   } = useBackgroundTasks();
 
-  const [myDriveFiles, setMyDriveFiles]     = useState([]);
-  const [myDriveLoading, setMyDriveLoading] = useState(false);
   const [searchQuery, setSearchQuery]       = useState('');
   const [showBanner, setShowBanner]         = useState(true);
   const [indexing, setIndexing]             = useState({});          // fid → 'indexing'|'done'|'error'
@@ -77,29 +78,22 @@ export default function DriveChatDocumentList({ onSuggestedQuestion }) {
 
   const { selectedDocs, toggleDocSelection, setSelectedDocs } = useChatContext();
 
-  // ── Fetch personal Drive files from root ──────────────────────────────────
-  const fetchMyDriveFiles = useCallback(async () => {
-    if (!driveConnected) return;
-    setMyDriveLoading(true);
-    try {
-      const res = await driveAPI.listMyDrive('root');
-      const list = res.files || res.items || res || [];
-      setMyDriveFiles(list);
-    } catch (err) {
-      console.error('[DriveChatDocumentList] Failed to fetch root files:', err);
-    } finally {
-      setMyDriveLoading(false);
-    }
-  }, [driveConnected]);
-
-  // Load files on mount or connection change
+  // Load files on mount or connection change if not already populated
   useEffect(() => {
-    fetchMyDriveFiles();
-  }, [fetchMyDriveFiles, driveConnected]);
+    if (driveConnected && myDriveFiles.length === 0 && !myDriveLoading) {
+      loadMyDrive('root');
+    }
+  }, [driveConnected, myDriveFiles.length, myDriveLoading, loadMyDrive]);
 
   const handleRefresh = async () => {
-    await fetchMyDriveFiles();
-    await startPersistentDeepScan();
+    try {
+      await loadMyDrive('root');
+    } catch (err) {
+      console.error('[DriveChatDocumentList] Refresh failed:', err);
+    }
+    try {
+      await startPersistentDeepScan();
+    } catch (err) {}
   };
 
   // ── fetchSuggestedQuestions ────────────────────────────────────────────────
@@ -172,8 +166,8 @@ export default function DriveChatDocumentList({ onSuggestedQuestion }) {
     }
   });
 
-  // Filter to supported formats only: pdf, docx, doc, txt, md, csv, pptx, xlsx
-  const SUPPORTED_EXTENSIONS = ['pdf', 'docx', 'doc', 'txt', 'md', 'csv', 'pptx', 'xlsx'];
+  // Filter to supported formats only: pdf, docx, txt
+  const SUPPORTED_EXTENSIONS = ['pdf', 'docx', 'txt'];
   const filtered = mergedFiles.filter(file => {
     const ext = file.name?.split('.').pop()?.toLowerCase() || '';
     const matchesSearch = !searchQuery ||
@@ -295,7 +289,18 @@ export default function DriveChatDocumentList({ onSuggestedQuestion }) {
                   <span className="text-[10px] text-green-500 shrink-0">✓ ready</span>
                 )}
                 {idxState === 'error' && (
-                  <span className="text-[10px] text-red-400 shrink-0">✗ failed</span>
+                  <span className="flex items-center gap-1.5 shrink-0">
+                    <span className="text-[10px] text-red-400">✗ failed</span>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        indexFile(f);
+                      }}
+                      className="text-[10px] text-primary hover:text-primary-dark underline cursor-pointer hover:no-underline"
+                    >
+                      retry
+                    </button>
+                  </span>
                 )}
                 <button
                   onClick={() => toggleDocSelection(fid)}

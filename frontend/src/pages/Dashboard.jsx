@@ -7,10 +7,11 @@ import {
 } from 'lucide-react';
 import React, { useState, useEffect, useRef } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { chatAPI, driveAPI, documentAPI } from '../services/api';
+import api, { chatAPI, driveAPI, documentAPI } from '../services/api';
 import FilePreviewDrawer from '../components/FilePreviewDrawer';
 import SharedNavbar from '../components/SharedNavbar';
 import DocumentUpload from '../components/DocumentUpload';
+import { useBackgroundTasks } from '../context/BackgroundTasksContext';
 
 
 
@@ -53,14 +54,35 @@ export default function Dashboard() {
   const [recentDocs, setRecentDocs] = useState([]);
   const [totalDocsCount, setTotalDocsCount] = useState(0);
   const quickChatAccumulatorRef = useRef('');
-  const [driveFolders, setDriveFolders] = useState([]);
   const [previewFile, setPreviewFile] = useState(null);
   const [uploadOpen, setUploadOpen] = useState(false);
-  const [foldersLoading, setFoldersLoading] = useState(false);
   const [docsLoading, setDocsLoading] = useState(false);
   const hasLoadedDocs = useRef(false);
   const hasLoadedFolders = useRef(false);
-  const [folderFileCounts, setFolderFileCounts] = useState({});
+  const {
+    driveConnected,
+    deepScanState,
+    myDriveFolders,
+    myDriveFiles,
+    myDriveLoading,
+    loadMyDrive,
+    indexedDriveFileIds,
+  } = useBackgroundTasks();
+  const [connectLoading, setConnectLoading] = useState(false);
+
+  const handleConnectDrive = async () => {
+    setConnectLoading(true);
+    try {
+      const res = await api.get('/api/drive/oauth/auth-url');
+      if (res.data?.auth_url) {
+        window.location.href = res.data.auth_url;
+      }
+    } catch (err) {
+      console.error("Failed to connect Drive:", err);
+    } finally {
+      setConnectLoading(false);
+    }
+  };
   // Γ£à Dashboard cache expiry = 5 minutes
   const CACHE_EXPIRY = 5 * 60 * 1000;
 
@@ -70,60 +92,13 @@ export default function Dashboard() {
   const [globalSearchResults, setGlobalSearchResults] = useState(null);
   const [isSearching, setIsSearching] = useState(false);
 
-  // ΓöÇΓöÇ FIXED: use driveAPI.getFolders() instead of raw fetch ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
   const fetchFolders = async (isManual = false) => {
-    // ≡ƒºá Try cache first (only if not manual refresh)
-    if (!isManual) {
-      const cachedFolders = loadCache("drive_folders");
-      const cachedCounts = loadCache("folder_counts");
-
-      if (cachedFolders && cachedCounts) {
-        console.log("ΓÜí Using cached folders");
-        setDriveFolders(cachedFolders);
-        setFolderFileCounts(cachedCounts);
-        return;
+    if (driveConnected) {
+      try {
+        await loadMyDrive('root');
+      } catch (err) {
+        console.error("Failed to fetch folders in dashboard:", err);
       }
-    }
-
-    setFoldersLoading(true);
-
-    try {
-      const foldersData = await driveAPI.listFolders();
-      const folders = Array.isArray(foldersData)
-        ? foldersData
-        : foldersData.folders || [];
-
-      setDriveFolders(folders);
-
-      const counts = {};
-      await Promise.all(
-        folders.map(async (folder) => {
-          try {
-            const contents = await driveAPI.listFolderContents(folder.id);
-            const files =
-              contents.files ||
-              contents.items ||
-              contents.documents ||
-              contents ||
-              [];
-
-            counts[folder.id] = Array.isArray(files) ? files.length : 0;
-          } catch {
-            counts[folder.id] = 0;
-          }
-        })
-      );
-
-      setFolderFileCounts(counts);
-
-      // ≡ƒÆ╛ SAVE CACHE
-      saveCache("drive_folders", folders);
-      saveCache("folder_counts", counts);
-
-    } catch (err) {
-      console.error("[FOLDERS ERROR]", err);
-    } finally {
-      setFoldersLoading(false);
     }
   };
 
@@ -243,6 +218,12 @@ const latestDocs = filteredDocs.slice(0, 3);
 
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (driveConnected === true) {
+      fetchDashboardData(true);
+    }
+  }, [driveConnected]);
 
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedGlobalSearch(globalSearch), 400);
@@ -485,24 +466,62 @@ const greeting = getGreetingData();
 
         {/* SECTION 2 — Stats Row */}
         <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
-          {[
-            { label: 'Documents indexed', value: totalDocsCount.toString(), icon: <FileText className="w-5 h-5 text-primary" />, change: '+3 this week', color: 'from-primary/10 to-transparent', textColor: 'text-primary' },
-            { label: 'Queries answered', value: '148', icon: <MessageSquare className="w-5 h-5 text-emerald-500" />, change: '+22 today', color: 'from-emerald-500/10 to-transparent', textColor: 'text-emerald-500' },
-            { label: 'Drive folders', value: driveFolders.length.toString(), icon: <Folder className="w-5 h-5 text-blue-500" />, change: `${driveFolders.reduce((sum, f) => sum + (folderFileCounts[f.id] || 0), 0)} files inside`, color: 'from-blue-500/10 to-transparent', textColor: 'text-blue-500' },
-            { label: 'Answer accuracy', value: '98%', icon: <TrendingUp className="w-5 h-5 text-amber-500" />, change: 'High confidence', color: 'from-amber-500/10 to-transparent', textColor: 'text-amber-500' },
-          ].map((stat, i) => (
-            <div key={i} className="glass-card p-5 relative overflow-hidden group hover:-translate-y-1 transition-all duration-300">
-              <div className={`absolute top-0 right-0 w-32 h-32 bg-gradient-to-bl ${stat.color} rounded-bl-full -z-10 opacity-50 group-hover:opacity-100 transition-opacity`} />
-              <div className={`w-10 h-10 rounded-xl bg-white dark:bg-white/5 border border-gray-100 dark:border-white/5 shadow-sm flex items-center justify-center mb-4 ${stat.textColor}`}>
-                {stat.icon}
+          {(() => {
+            const uniqueScannedFolders = new Set(
+              (deepScanState?.scannedFiles || [])
+                .map(file => file.folder_name || file.full_path?.split('/')[0])
+                .filter(Boolean)
+            );
+
+            const totalDriveFolders = deepScanState?.scanStatus === 'complete' && uniqueScannedFolders.size > 0
+              ? uniqueScannedFolders.size
+              : myDriveFolders.length;
+
+            const totalDriveFiles = deepScanState?.scanStatus === 'complete' && deepScanState?.scannedFiles?.length > 0
+              ? deepScanState.scannedFiles.length
+              : myDriveFiles.length;
+
+            const stats = [
+              {
+                label: 'Total Indexed Files',
+                value: totalDocsCount.toString(),
+                icon: <FileText className="w-5 h-5 text-[#F95F9E]" />,
+                change: 'Active index',
+              },
+              {
+                label: 'Total Drive Folders',
+                value: totalDriveFolders.toString(),
+                icon: <Folder className="w-5 h-5 text-[#F95F9E]" />,
+                change: 'Synced',
+              },
+              {
+                label: 'Total Drive Files',
+                value: totalDriveFiles.toString(),
+                icon: <HardDrive className="w-5 h-5 text-[#F95F9E]" />,
+                change: 'Discovered',
+              },
+              {
+                label: 'Queries Answered',
+                value: '148',
+                icon: <MessageSquare className="w-5 h-5 text-[#F95F9E]" />,
+                change: 'Instant answers',
+              },
+            ];
+
+            return stats.map((stat, i) => (
+              <div key={i} className="glass-card p-5 relative overflow-hidden group hover:-translate-y-1 transition-all duration-300 border border-gray-200/50 dark:border-white/5 hover:border-[#F95F9E]/40 dark:hover:border-[#F95F9E]/40 hover:shadow-[0_0_20px_rgba(249,95,158,0.15)] dark:hover:shadow-[0_0_20px_rgba(249,95,158,0.25)]">
+                <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-to-bl from-[#F95F9E]/5 to-transparent rounded-bl-full -z-10 opacity-30 group-hover:opacity-80 transition-opacity" />
+                <div className="w-10 h-10 rounded-xl bg-white/40 dark:bg-white/5 border border-gray-100 dark:border-white/5 shadow-sm flex items-center justify-center mb-4 text-[#F95F9E]">
+                  {stat.icon}
+                </div>
+                <h3 className="text-3xl font-bold text-gray-900 dark:text-white mb-1">{stat.value}</h3>
+                <p className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-3">{stat.label}</p>
+                <div className="text-xs font-semibold text-[#F95F9E]/90 flex items-center gap-1">
+                  <Clock className="w-3 h-3 text-[#F95F9E]" /> {stat.change}
+                </div>
               </div>
-              <h3 className="text-3xl font-bold text-gray-900 dark:text-white mb-1">{stat.value}</h3>
-              <p className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-3">{stat.label}</p>
-              <div className={`text-xs font-semibold ${stat.textColor} opacity-80 flex items-center gap-1`}>
-                <Clock className="w-3 h-3" /> {stat.change}
-              </div>
-            </div>
-          ))}
+            ));
+          })()}
         </section>
 
 
@@ -639,18 +658,18 @@ const greeting = getGreetingData();
 
         </section>
 
-        {/* SECTION 5 ΓÇö Drive Folders Grid */}
+        {/* SECTION 5 ── Drive Folders Grid */}
         <section className="glass-card flex flex-col overflow-hidden mb-8">
           <div className="p-5 sm:p-6 border-b border-gray-100 dark:border-white/5 flex justify-between items-center bg-white/40 dark:bg-white/5">
             <h2 className="font-bold text-lg text-gray-900 dark:text-white">Drive folders</h2>
             <div className="flex items-center gap-3">
               <button
                 onClick={() => fetchFolders(true)}
-                disabled={foldersLoading}
+                disabled={myDriveLoading}
                 className="p-1.5 rounded-lg text-gray-400 hover:text-primary hover:bg-gray-100 dark:hover:bg-white/5 transition-colors disabled:opacity-40"
                 title="Refresh"
               >
-                <svg xmlns="http://www.w3.org/2000/svg" className={`w-4 h-4 ${foldersLoading ? 'animate-spin' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" /></svg>
+                <svg xmlns="http://www.w3.org/2000/svg" className={`w-4 h-4 ${myDriveLoading ? 'animate-spin' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" /></svg>
               </button>
               <Link to="/app/drive" className="text-sm font-medium text-primary hover:text-primary-light transition-colors">
                 Open Drive
@@ -658,55 +677,115 @@ const greeting = getGreetingData();
             </div>
           </div>
 
-          <div className="p-5 sm:p-6 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-            {foldersLoading ? (
-              [1, 2, 3, 4].map(i => (
-                <div key={i} className="bg-white/60 dark:bg-background-dark/40 border border-gray-200/60 dark:border-white/10 rounded-xl p-4 animate-pulse">
-                  <div className="flex items-start gap-3 mb-4">
-                    <div className="w-10 h-10 rounded-lg bg-gray-200 dark:bg-white/10" />
-                    <div className="flex-1 space-y-2 pt-1">
-                      <div className="h-3 bg-gray-200 dark:bg-white/10 rounded w-3/4" />
-                      <div className="h-2 bg-gray-100 dark:bg-white/5 rounded w-1/2" />
+          <div className="p-5 sm:p-6">
+            {driveConnected === false ? (
+              <div className="relative w-full overflow-hidden p-6 sm:p-8 rounded-2xl bg-gradient-to-br from-[#F95F9E]/10 to-transparent border border-[#F95F9E]/20 backdrop-blur-md flex flex-col sm:flex-row items-center justify-between gap-6 shadow-[0_4px_30px_rgba(249,95,158,0.05)]">
+                <div className="absolute top-[-20%] right-[-5%] w-[180px] h-[180px] rounded-full bg-[#F95F9E]/10 blur-[40px] pointer-events-none" />
+                <div className="flex items-center gap-4">
+                  <div className="shrink-0 w-12 h-12 rounded-xl bg-white/10 border border-[#F95F9E]/20 flex items-center justify-center text-[#F95F9E] shadow-lg shadow-[#F95F9E]/5 animate-pulse">
+                    <Folder className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-bold text-gray-900 dark:text-white">Connect Your Google Drive</h3>
+                    <p className="text-sm text-gray-500 dark:text-gray-400 mt-1 max-w-lg leading-relaxed">
+                      Link your Google Drive account dynamically to Nexora to browse, search, and instant-ask questions across your personal folders.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={handleConnectDrive}
+                  disabled={connectLoading}
+                  className="group flex items-center gap-2 px-5 py-2.5 rounded-xl font-bold text-sm bg-primary hover:bg-primary-light text-white transition-all shadow-md shadow-primary/20 hover:shadow-lg hover:shadow-primary/35 hover:-translate-y-0.5 whitespace-nowrap cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {connectLoading ? 'Connecting...' : 'Connect Google Drive'}
+                </button>
+              </div>
+            ) : myDriveLoading && myDriveFolders.length === 0 ? (
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                {[1, 2, 3, 4].map(i => (
+                  <div key={i} className="bg-white/60 dark:bg-background-dark/40 border border-gray-200/60 dark:border-white/10 rounded-xl p-4 animate-pulse">
+                    <div className="flex items-start gap-3 mb-4">
+                      <div className="w-10 h-10 rounded-lg bg-gray-200 dark:bg-white/10" />
+                      <div className="flex-1 space-y-2 pt-1">
+                        <div className="h-3 bg-gray-200 dark:bg-white/10 rounded w-3/4" />
+                        <div className="h-2 bg-gray-100 dark:bg-white/5 rounded w-1/2" />
+                      </div>
+                    </div>
+                    <div className="h-2 bg-gray-100 dark:bg-white/5 rounded w-full mt-2" />
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                {/* Unified Google Drive Session Card */}
+                <div className="relative w-full overflow-hidden p-6 rounded-2xl bg-gradient-to-br from-[#F95F9E]/10 to-transparent border border-[#F95F9E]/20 backdrop-blur-md flex flex-col sm:flex-row items-center justify-between gap-6 shadow-[0_4px_30px_rgba(249,95,158,0.05)] col-span-full mb-2">
+                  <div className="absolute top-[-20%] right-[-5%] w-[180px] h-[180px] rounded-full bg-[#F95F9E]/10 blur-[40px] pointer-events-none" />
+                  <div className="flex flex-col sm:flex-row items-center gap-4 text-center sm:text-left w-full sm:w-auto">
+                    <div className="shrink-0 w-12 h-12 rounded-xl bg-white/10 border border-[#F95F9E]/20 flex items-center justify-center text-[#F95F9E] shadow-lg shadow-[#F95F9E]/5">
+                      <HardDrive className="w-6 h-6 animate-pulse" />
+                    </div>
+                    <div>
+                      <h3 className="text-lg font-bold text-gray-900 dark:text-white flex items-center justify-center sm:justify-start gap-2 font-sans">
+                        Google Drive Status
+                        <span className="px-2 py-0.5 text-[10px] font-semibold text-emerald-600 bg-emerald-50 dark:text-emerald-400 dark:bg-emerald-500/10 rounded-full border border-emerald-200 dark:border-emerald-800">
+                          Connected
+                        </span>
+                      </h3>
+                      <div className="flex flex-wrap items-center justify-center sm:justify-start gap-3 mt-2 text-sm text-gray-500 dark:text-gray-400">
+                        <span className="flex items-center gap-1.5 px-3 py-1 bg-white/50 dark:bg-white/5 border border-gray-200/50 dark:border-white/5 rounded-full text-xs font-medium shadow-sm">
+                          Folders: <strong className="text-primary">{myDriveFolders.length}</strong>
+                        </span>
+                        <span className="flex items-center gap-1.5 px-3 py-1 bg-white/50 dark:bg-white/5 border border-gray-200/50 dark:border-white/5 rounded-full text-xs font-medium shadow-sm">
+                          Files: <strong className="text-primary">{myDriveFiles.length}</strong>
+                        </span>
+                        <span className="flex items-center gap-1.5 px-3 py-1 bg-white/50 dark:bg-white/5 border border-gray-200/50 dark:border-white/5 rounded-full text-xs font-medium shadow-sm">
+                          Indexed: <strong className="text-primary">{indexedDriveFileIds.size}</strong>
+                        </span>
+                      </div>
                     </div>
                   </div>
-                  <div className="h-2 bg-gray-100 dark:bg-white/5 rounded w-full mt-2" />
+                  <Link
+                    to="/app/drive"
+                    className="group flex items-center gap-2 px-5 py-2.5 rounded-xl font-bold text-sm bg-primary hover:bg-primary-light text-white transition-all shadow-md shadow-primary/20 hover:shadow-lg hover:shadow-primary/35 hover:-translate-y-0.5 whitespace-nowrap cursor-pointer"
+                  >
+                    Browse My Drive
+                  </Link>
                 </div>
-              ))
-            ) : (
-              <>
-                {driveFolders.length === 0 && <div className="text-sm text-gray-500 p-4">No folders found.</div>}
-                {driveFolders.map((folder, i) => {
-                  const colors = ['indigo', 'emerald', 'amber', 'blue', 'purple'];
-                  const c = colors[i % colors.length];
-                  const colorClass = colorMap[c];
-                  const fileCount = folderFileCounts[folder.id] ?? 0;
-                  const updatedAt = folder.updated_at || folder.modified_at || folder.created_at;
-                  return (
-                    <div key={folder.id} className="bg-white/60 dark:bg-background-dark/40 border border-gray-200/60 dark:border-white/10 rounded-xl p-4 hover:-translate-y-1 hover:shadow-md hover:border-primary/30 transition-all group cursor-pointer" onClick={() => navigate('/app/drive')}>
-                      <div className="flex items-start gap-3 mb-3">
-                        <div className={`w-10 h-10 rounded-lg flex items-center justify-center border ${colorClass}`}>
-                          <Folder className="w-5 h-5" />
+
+                {myDriveFolders.length === 0 ? (
+                  <div className="text-sm text-gray-500 p-4 col-span-full">No folders found in your Google Drive.</div>
+                ) : (
+                  myDriveFolders.map((folder) => {
+                    const colorClass = 'text-[#F95F9E] bg-[#F95F9E]/5 border-[#F95F9E]/10 dark:bg-[#F95F9E]/10 dark:border-[#F95F9E]/20';
+                    const fileCount = getFolderFileCount(folder);
+                    const updatedAt = folder.updatedTime || folder.modifiedTime || folder.updated_at || folder.modified_at || folder.created_at;
+                    return (
+                      <div key={folder.id} className="bg-white/60 dark:bg-background-dark/40 border border-gray-200/60 dark:border-white/10 rounded-xl p-4 hover:-translate-y-1 hover:shadow-md hover:border-[#F95F9E]/30 dark:hover:border-[#F95F9E]/30 transition-all group cursor-pointer" onClick={() => navigate('/app/drive')}>
+                        <div className="flex items-start gap-3 mb-3">
+                          <div className={`w-10 h-10 rounded-lg flex items-center justify-center border ${colorClass}`}>
+                            <Folder className="w-5 h-5" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <h4 className="font-semibold text-gray-900 dark:text-white group-hover:text-primary transition-colors truncate">{folder.name}</h4>
+                            {updatedAt && (
+                              <p className="text-xs text-gray-400 mt-0.5">{new Date(updatedAt).toLocaleDateString()}</p>
+                            )}
+                          </div>
                         </div>
-                        <div className="min-w-0 flex-1">
-                          <h4 className="font-semibold text-gray-900 dark:text-white group-hover:text-primary transition-colors truncate">{folder.name}</h4>
-                          {updatedAt && (
-                            <p className="text-xs text-gray-400 mt-0.5">{new Date(updatedAt).toLocaleDateString()}</p>
-                          )}
+                        <div className="flex items-center justify-between mt-2 pt-2 border-t border-t-gray-100 dark:border-t-white/5">
+                          <span className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
+                            <FileText className="w-3.5 h-3.5" />
+                            {fileCount} {fileCount === 1 ? 'file' : 'files'}
+                          </span>
+                          <span className="text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-md bg-gray-100 dark:bg-white/5 text-gray-400">
+                            Drive
+                          </span>
                         </div>
                       </div>
-                      <div className="flex items-center justify-between mt-2 pt-2 border-t border-gray-100 dark:border-white/5">
-                        <span className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
-                          <FileText className="w-3.5 h-3.5" />
-                          {fileCount} {fileCount === 1 ? 'file' : 'files'}
-                        </span>
-                        <span className="text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-md bg-gray-100 dark:bg-white/5 text-gray-400">
-                          Drive
-                        </span>
-                      </div>
-                    </div>
-                  );
-                })}
-              </>
+                    );
+                  })
+                )}
+              </div>
             )}
           </div>
         </section>

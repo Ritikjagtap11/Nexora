@@ -65,7 +65,7 @@ export const documentAPI = {
 };
 
 export const chatAPI = {
-  getSuggestedQuestions: async (documentIds) => {
+  getSuggestedQuestions: async (documentIds, conversationHistory = []) => {
     try {
       const token = await getValidToken();
       const response = await fetch(`${API_BASE_URL}/api/chat/suggested-questions`, {
@@ -74,7 +74,10 @@ export const chatAPI = {
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ document_ids: documentIds }),
+        body: JSON.stringify({
+          document_ids: documentIds,
+          conversation_history: conversationHistory,
+        }),
       });
 
       if (!response.ok) {
@@ -222,8 +225,16 @@ export const driveAPI = {
     return response.data;
   },
 
-  getScanStatus: async (jobId) => {
-    const response = await api.get(`/api/drive/scan/${jobId}`);
+  getScanStatus: async (jobId, config = {}) => {
+    const response = await api.get(`/api/drive/scan/${jobId}`, config);
+    return response.data;
+  },
+
+  prioritizeFolder: async (jobId, folderId, folderName) => {
+    const response = await api.post(`/api/drive/scan/${jobId}/prioritize`, {
+      folder_id: folderId,
+      folder_name: folderName
+    });
     return response.data;
   },
 

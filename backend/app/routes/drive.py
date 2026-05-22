@@ -26,10 +26,98 @@ import re
 import json
 from datetime import datetime
 from googleapiclient.http import MediaIoBaseDownload
+from googleapiclient.discovery import build as gdrive_build
 
 logger = logging.getLogger(__name__)
 
-scan_jobs = {}
+import asyncio
+import threading
+
+class ScanManager:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self._jobs = {}
+
+    def get_job(self, job_id: str) -> dict:
+        with self.lock:
+            # Try memory cache first
+            if job_id in self._jobs:
+                return self._jobs[job_id].copy()
+        
+        # Fallback to Firestore (outside lock to avoid blocking other threads)
+        try:
+            db = get_firestore()
+            doc = db.collection("scan_jobs").document(job_id).get()
+            if doc.exists:
+                data = doc.to_dict()
+                with self.lock:
+                    self._jobs[job_id] = data
+                return data
+        except Exception as e:
+            logger.error(f"[ScanManager] Error loading job {job_id} from Firestore: {e}")
+        return None
+
+    def create_job(self, job_id: str, initial_state: dict):
+        with self.lock:
+            self._jobs[job_id] = initial_state.copy()
+        
+        # Save to Firestore
+        try:
+            db = get_firestore()
+            db.collection("scan_jobs").document(job_id).set(initial_state)
+        except Exception as e:
+            logger.error(f"[ScanManager] Error creating job {job_id} in Firestore: {e}")
+
+    def update_job(self, job_id: str, updates: dict):
+        with self.lock:
+            if job_id not in self._jobs:
+                # Attempt to load first
+                job = self.get_job(job_id)
+                if not job:
+                    self._jobs[job_id] = {}
+            self._jobs[job_id].update(updates)
+            current_state = self._jobs[job_id].copy()
+        
+        # Save to Firestore
+        try:
+            db = get_firestore()
+            db.collection("scan_jobs").document(job_id).set(current_state, merge=True)
+        except Exception as e:
+            logger.error(f"[ScanManager] Error updating job {job_id} in Firestore: {e}")
+
+    def finalize_job(self, job_id: str, status: str, error_msg: str = None, progress: int = None):
+        updates = {"status": status}
+        if error_msg is not None:
+            updates["current_file"] = error_msg
+            updates["error"] = error_msg
+        if progress is not None:
+            updates["progress"] = progress
+            
+        self.update_job(job_id, updates)
+
+    def mark_all_active_as_cancelled(self):
+        """Marks any active scan jobs in memory or Firestore as cancelled."""
+        with self.lock:
+            for jid, job in self._jobs.items():
+                if job.get("status") in ["queued", "connecting", "fetching", "scanning", "indexing", "running"]:
+                    job["status"] = "cancelled"
+                    job["current_file"] = "Scan interrupted due to server reload/restart."
+                    job["error"] = "Scan interrupted due to server reload/restart."
+        
+        try:
+            db = get_firestore()
+            active_jobs = db.collection("scan_jobs").where("status", "in", ["queued", "connecting", "fetching", "scanning", "indexing", "running"]).stream()
+            for doc in active_jobs:
+                logger.info(f"[ScanManager] Cleanup: Marking active job {doc.id} as cancelled.")
+                db.collection("scan_jobs").document(doc.id).update({
+                    "status": "cancelled",
+                    "current_file": "Scan interrupted due to server reload/restart.",
+                    "error": "Scan interrupted due to server reload/restart."
+                })
+        except Exception as e:
+            logger.error(f"[ScanManager] Error cleaning up active jobs: {e}")
+
+scan_manager = ScanManager()
 
 router = APIRouter(prefix="/api/drive", tags=["drive"])
 
@@ -182,8 +270,6 @@ async def list_user_my_drive(
     """
     Lists files and folders from the authenticated user's OWN Google Drive.
     Uses their personal OAuth token — NOT the service account.
-    folder_id defaults to 'root' = My Drive root.
-    Pass a folder_id to browse inside a subfolder.
     """
     creds = _get_user_oauth_credentials(current_user["id"])
     if not creds or not creds.valid:
@@ -192,7 +278,6 @@ async def list_user_my_drive(
             detail="Google Drive not connected. Please connect your Drive first."
         )
     try:
-        from googleapiclient.discovery import build as gdrive_build
         service = gdrive_build("drive", "v3", credentials=creds, static_discovery=True)
         results = service.files().list(
             q=f"'{folder_id}' in parents and trashed=false",
@@ -257,346 +342,97 @@ def _get_user_oauth_creds(uid: str):
     return _get_user_oauth_credentials(uid)
 
 
-# ── POST /api/drive/my-scan ───────────────────────────────────────────────────
-@router.post("/my-scan")
-async def start_my_drive_scan(
-    background_tasks: BackgroundTasks,
-    current_user: dict = Depends(get_current_user),
-):
+def is_supported_indexable_file(name: str, mime_type: str) -> bool:
+    """Returns True if the file type is a supported indexable format (PDF, DOCX, TXT)."""
+    name_lower = name.lower()
+    if mime_type == "application/pdf" or name_lower.endswith(".pdf"):
+        return True
+    if mime_type in [
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/msword"
+    ] or name_lower.endswith((".docx", ".doc")):
+        return True
+    if mime_type in ["text/plain", "text/markdown"] or name_lower.endswith((".txt", ".md")):
+        return True
+    if mime_type == "application/vnd.google-apps.document":
+        return True
+    return False
+
+
+def index_single_user_file_helper(service, db, drive_file_id: str, filename: str, mime_type: str, uid: str, email: str) -> dict:
     """
-    Starts a deep scan of the user's OWN Google Drive (root + all subfolders).
-    Uses their personal OAuth token — NOT the service account.
+    Downloads, chunks, and indexes a single user-owned Google Drive file securely.
+    Ensures absolute privacy and isolated user storage in the vector DB.
     """
-    creds = _get_user_oauth_creds(current_user["id"])
-    if not creds or not creds.valid:
-        raise HTTPException(status_code=403, detail="Drive not connected.")
-
-    job_id = str(uuid.uuid4())
-    scan_jobs[job_id] = {
-        "status": "running",
-        "scanned": 0,
-        "total": 0,
-        "current_file": "",
-        "files": [],
-        "failed": [],
-    }
-    background_tasks.add_task(deep_scan_user_drive, job_id, current_user["id"])
-    return {"job_id": job_id}
-
-
-def deep_scan_user_drive(job_id: str, uid: str):
-    """
-    Recursively scans ALL files in user's My Drive.
-    Files are pushed to scan_jobs IMMEDIATELY as each folder is scanned
-    so the frontend sees live progress without waiting for full traversal.
-    """
-    try:
-        creds = _get_user_oauth_creds(uid)
-        if not creds or not creds.valid:
-            scan_jobs[job_id]["status"] = "failed"
-            return
-
-        from googleapiclient.discovery import build as gdrive_build
-        service = gdrive_build("drive", "v3", credentials=creds, static_discovery=True)
-
-        def scan_folder_live(folder_id, folder_path):
-            """
-            Scans one folder and immediately pushes files to scan_jobs.
-            Then recurses into subfolders.
-            """
-            try:
-                # ── Get subfolders ──────────────────────────────────
-                subs = service.files().list(
-                    q=f"'{folder_id}' in parents "
-                      f"and mimeType='application/vnd.google-apps.folder' "
-                      f"and trashed=false",
-                    fields="files(id, name)",
-                    pageSize=500,
-                ).execute().get("files", [])
-
-                # ── Get files in THIS folder ────────────────────────
-                files = service.files().list(
-                    q=f"'{folder_id}' in parents "
-                      f"and trashed=false "
-                      f"and mimeType!='application/vnd.google-apps.folder'",
-                    fields="files(id, name, size, mimeType, modifiedTime, webViewLink)",
-                    pageSize=500,
-                ).execute().get("files", [])
-
-                # ── Push files to scan_jobs IMMEDIATELY ─────────────
-                for f in files:
-                    file_entry = {
-                        "id":             f["id"],
-                        "name":           f["name"],
-                        "folder_name":    folder_path.split("/")[-1],
-                        "full_path":      f"{folder_path}/{f['name']}",
-                        "drive_web_link": f.get("webViewLink", ""),
-                        "size":           f.get("size", 0),
-                        "mimeType":       f.get("mimeType", ""),
-                        "modifiedTime":   f.get("modifiedTime", ""),
-                    }
-                    scan_jobs[job_id]["files"].append(file_entry)
-                    scan_jobs[job_id]["scanned"] += 1
-                    scan_jobs[job_id]["total"]   += 1
-                    scan_jobs[job_id]["current_file"] = f["name"]
-
-                # ── Recurse into subfolders ─────────────────────────
-                for sub in subs:
-                    scan_folder_live(sub["id"], f"{folder_path}/{sub['name']}")
-
-            except Exception as e:
-                logger.error(f"[MY SCAN] Folder error at '{folder_path}': {e}")
-
-        # Start from My Drive root
-        logger.info(f"[MY SCAN] Starting live scan for user: {uid}")
-        scan_folder_live("root", "My Drive")
-
-        scan_jobs[job_id]["status"] = "complete"
-        total = scan_jobs[job_id]["total"]
-        logger.info(f"[MY SCAN] Complete: {total} files for user {uid}")
-
-    except Exception as e:
-        scan_jobs[job_id]["status"] = "failed"
-        logger.error(f"[MY SCAN] Fatal error: {e}")
-        import traceback
-        traceback.print_exc()
-
-
-# ── POST /api/drive/scan ──────────────────────────────────────────────────────
-
-@router.post("/scan")
-async def start_scan(
-    background_tasks: BackgroundTasks,
-    current_user=Depends(get_current_user),
-):
-    job_id = str(uuid.uuid4())
-    scan_jobs[job_id] = {
-        "status": "running",
-        "scanned": 0,
-        "total": 0,
-        "current_file": "",
-        "files": [],
-        "failed": [],
-    }
-    background_tasks.add_task(deep_scan_drive, job_id)
-    return {"job_id": job_id}
-
-
-@router.get("/scan/{job_id}")
-async def get_scan_status(job_id: str, current_user=Depends(get_current_user)):
-    if job_id not in scan_jobs:
-        return {"status": "not_found", "scanned": 0, "total": 0}
-    return scan_jobs[job_id]
-
-
-def deep_scan_drive(job_id: str):
-    try:
-        db = get_firestore()
-        root_id = settings.NEXORA_DRIVE_FOLDER_ID
-
-        def get_files_recursive(folder_id, folder_name, path):
-            all_files = []
-            try:
-                subs = (
-                    drive_service.service.files()
-                    .list(
-                        q=f"'{folder_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
-                        fields="files(id, name)",
-                        supportsAllDrives=True,
-                    )
-                    .execute()
-                    .get("files", [])
-                )
-                for sub in subs:
-                    all_files.extend(
-                        get_files_recursive(sub["id"], sub["name"], f"{path}/{sub['name']}")
-                    )
-                files = (
-                    drive_service.service.files()
-                    .list(
-                        q=f"'{folder_id}' in parents and trashed=false and mimeType!='application/vnd.google-apps.folder'",
-                        fields="files(id, name, size, mimeType, modifiedTime, webViewLink)",
-                        supportsAllDrives=True,
-                    )
-                    .execute()
-                    .get("files", [])
-                )
-                for f in files:
-                    f["folder_name"] = folder_name
-                    f["full_path"] = f"{path}/{f['name']}"
-                    all_files.append(f)
-            except Exception as e:
-                print(f"[SCAN] Folder error: {e}")
-            return all_files
-
-        all_files = get_files_recursive(root_id, "NEXORA", "NEXORA")
-        scan_jobs[job_id]["total"] = len(all_files)
-        print(f"[SCAN] Found {len(all_files)} files")
-
-        for i, file in enumerate(all_files):
-            scan_jobs[job_id]["current_file"] = file["name"]
-            scan_jobs[job_id]["scanned"] = i + 1
-
-            try:
-                db.collection("scanned_files").document(file["id"]).set(
-                    {
-                        "file_name": file["name"],
-                        "folder_name": file.get("folder_name"),
-                        "drive_id": file["id"],
-                        "drive_web_link": file.get("webViewLink", ""),
-                        "full_path": file.get("full_path", ""),
-                        "file_size": file.get("size", 0),
-                        "mime_type": file.get("mimeType", ""),
-                        "scanned_at": datetime.utcnow(),
-                    }
-                )
-            except Exception as e:
-                scan_jobs[job_id]["failed"].append(file["name"])
-
-            scan_jobs[job_id]["files"].append(
-                {
-                    "id": file["id"],
-                    "name": file["name"],
-                    "folder_name": file.get("folder_name"),
-                    "full_path": file.get("full_path"),
-                    "drive_web_link": file.get("webViewLink", ""),
-                    "size": file.get("size", 0),
-                    "mimeType": file.get("mimeType", ""),
-                    "modifiedTime": file.get("modifiedTime", ""),
-                }
-            )
-
-        scan_jobs[job_id]["status"] = "complete"
-        print(f"[SCAN] Complete: {len(all_files)} files")
-
-    except Exception as e:
-        scan_jobs[job_id]["status"] = "failed"
-        print(f"[SCAN] Error: {e}")
-        import traceback
-        traceback.print_exc()
-
-
-# ── POST /api/drive/index ─────────────────────────────────────────────────────
-# Downloads a Drive file and indexes it into the vector store so the AI
-# can answer questions about it — same pipeline as /documents/upload
-
-@router.post("/index")
-async def index_drive_file(
-    body: dict,
-    current_user: dict = Depends(get_current_user),
-):
-    drive_file_id = body.get("file_id", "").strip()
-    if not drive_file_id:
-        raise HTTPException(status_code=400, detail="file_id is required")
-
-    # ── 1. Check if already indexed (skip re-work) ────────────────────────
-    db = get_firestore()
+    # ── 1. Check if already indexed ───────────────────────────────────────────
     existing = (
         db.collection("drive_indexed_files")
         .where("drive_file_id", "==", drive_file_id)
-        .where("user_id", "==", current_user["id"])
+        .where("user_id", "==", uid)
         .limit(1)
         .stream()
     )
-    for _ in existing:
-        # Already indexed — return the existing doc_id
-        logger.info(f"[DRIVE INDEX] Already indexed: {drive_file_id}")
-        return {"success": True, "already_indexed": True, "drive_file_id": drive_file_id}
+    for doc in existing:
+        logger.info(f"[DRIVE INDEX] Helper already indexed: {drive_file_id}")
+        data = doc.to_dict()
+        return {"success": True, "already_indexed": True, "doc_id": data.get("doc_id"), "chunks": data.get("chunk_count", 0)}
 
-    # ── 2. Fetch file metadata from Drive ─────────────────────────────────
-    try:
-        service = get_drive_service()
-        meta = (
-            service.files()
-            .get(
-                fileId=drive_file_id,
-                fields="name,mimeType,size",
-                supportsAllDrives=True,
-            )
-            .execute()
+    # ── 2. Download file bytes from Drive ────────────────────────────────────
+    fh = io.BytesIO()
+    if mime_type in GOOGLE_EXPORT_MAP:
+        export_mime, ext = GOOGLE_EXPORT_MAP[mime_type]
+        if not filename.endswith(ext):
+            filename += ext
+        request = service.files().export_media(
+            fileId=drive_file_id, mimeType=export_mime
         )
-    except Exception as e:
-        logger.error(f"[DRIVE INDEX] Metadata fetch error: {e}")
-        raise HTTPException(status_code=404, detail=f"Drive file not found: {e}")
-
-    filename = meta.get("name", "drive_file")
-    mime_type = meta.get("mimeType", "")
-
-    # ── 3. Reject unsupported types (images, videos, etc.) ────────────────
-    if not any(mime_type.startswith(p) for p in ALLOWED_MIME_PREFIXES):
-        raise HTTPException(
-            status_code=415,
-            detail=f"File type '{mime_type}' is not supported for indexing.",
+    else:
+        request = service.files().get_media(
+            fileId=drive_file_id, supportsAllDrives=True
         )
 
-    # ── 4. Download file bytes from Drive ─────────────────────────────────
-    try:
-        fh = io.BytesIO()
+    downloader = MediaIoBaseDownload(fh, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
 
-        if mime_type in GOOGLE_EXPORT_MAP:
-            # Google Docs/Sheets/Slides — must export, not download directly
-            export_mime, ext = GOOGLE_EXPORT_MAP[mime_type]
-            if not filename.endswith(ext):
-                filename += ext
-            request = service.files().export_media(
-                fileId=drive_file_id, mimeType=export_mime
-            )
-        else:
-            request = service.files().get_media(
-                fileId=drive_file_id, supportsAllDrives=True
-            )
+    file_bytes = fh.getvalue()
 
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
-
-        file_bytes = fh.getvalue()
-    except Exception as e:
-        logger.error(f"[DRIVE INDEX] Download error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to download file: {e}")
-
-    # ── 5. Save to temp disk (DocumentProcessor needs a file path) ─────────
+    # ── 3. Save to temp disk ─────────────────────────────────────────────────
     doc_id = str(uuid.uuid4())
     file_path = os.path.join(settings.UPLOAD_DIR, f"{doc_id}_{filename}")
-
     try:
         with open(file_path, "wb") as f:
             f.write(file_bytes)
 
-        # ── 6. Chunk the document ─────────────────────────────────────────
+        # ── 4. Chunk document ────────────────────────────────────────────────
         chunks = DocumentProcessor.process_document(file_path, filename)
         if not chunks:
-            raise HTTPException(
-                status_code=422, detail="No content could be extracted from this file."
-            )
+            raise ValueError("No content could be extracted from this file.")
 
-        # ── 7. Build metadata (same shape as upload route) ────────────────
-        user_doc = db.collection("users").document(current_user["id"]).get()
-        user_data = user_doc.to_dict() or {}
-        email = (
-            user_data.get("email")
-            or current_user.get("email")
-            or str(current_user["id"])
-        )
+        page_count = max([c.get("page_number", 1) for c in chunks]) if chunks else 1
+        full_text = "\n".join([c["text"] for c in chunks])
+        content_preview = full_text[:300]
 
+        # ── 5. Build metadata ────────────────────────────────────────────────
         metadata = {
             "id": doc_id,
             "filename": filename,
             "file_type": _get_file_type(filename),
             "upload_date": datetime.now().isoformat(),
             "file_size": len(file_bytes),
-            "user_id": current_user["id"],
+            "user_id": uid,
             "username": email,
-            "drive_file_id": drive_file_id,   # ← tag so we know origin
+            "drive_file_id": drive_file_id,
             "summary": None,
             "suggested_questions": [],
         }
 
-        # ── 8. Generate summary + questions (same as upload route) ────────
+        # ── 6. Generate summary + questions using LLM ─────────────────────────
+        summary = ""
+        questions = []
         try:
             preview_text = "\n".join([c["text"] for c in chunks[:3]])
-
             summary = "".join(
                 [
                     chunk
@@ -616,55 +452,338 @@ async def index_drive_file(
 
             json_match = re.search(r"\[.*?\]", questions_raw, re.DOTALL)
             questions = json.loads(json_match.group(0)) if json_match else []
-
             metadata["summary"] = summary
             metadata["suggested_questions"] = questions[:3]
-        except Exception as e:
-            print(f"[DRIVE INDEX] Summary/Questions error: {e}")
+        except Exception as llm_err:
+            logger.warning(f"[DRIVE INDEX] LLM summary creation failed for {filename}: {llm_err}")
 
-        # ── 9. Embed + store in vector DB ─────────────────────────────────
+        # ── 7. Embed and add to FAISS ────────────────────────────────────────
         num_chunks = embedding_service.add_documents(chunks, metadata)
 
-        # ── 10. Record in Firestore so we don't re-index next time ────────
-        db.collection("drive_indexed_files").document(doc_id).set(
-            {
-                "doc_id": doc_id,
-                "drive_file_id": drive_file_id,
-                "filename": filename,
-                "user_id": current_user["id"],
-                "username": email,
-                "summary": metadata.get("summary"),
-                "suggested_questions": metadata.get("suggested_questions", []),
-                "chunk_count": num_chunks,
-                "indexed_at": datetime.utcnow(),
-            }
-        )
-
-        logger.info(f"[DRIVE INDEX] Done: {filename} → {num_chunks} chunks (doc_id={doc_id})")
-        return {
-            "success": True,
+        # ── 8. Record in Firestore drive_indexed_files ───────────────────────
+        db_record = {
             "doc_id": doc_id,
             "drive_file_id": drive_file_id,
             "filename": filename,
-            "chunks": num_chunks,
-            "suggested_questions": metadata.get("suggested_questions", []),
+            "user_id": uid,
+            "username": email,
+            "summary": summary,
+            "suggested_questions": questions[:3],
+            "chunk_count": num_chunks,
+            "indexed_at": datetime.utcnow(),
+            "content_preview": content_preview,
+            "page_count": page_count,
+            "language": "English",
+            "full_path": f"My Drive/{filename}",
         }
+        db.collection("drive_indexed_files").document(doc_id).set(db_record)
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[DRIVE INDEX] Unexpected error: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.info(f"[DRIVE INDEX] Successfully indexed: {filename} (chunks={num_chunks})")
+        return {"success": True, "doc_id": doc_id, "chunks": num_chunks}
     finally:
-        # Always clean up temp file
         if os.path.exists(file_path):
-            os.remove(file_path)
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
 
 
-# ── GET /api/drive/index-status ───────────────────────────────────────────────
-# Returns whether a Drive file is already indexed and how many chunks it has
+# ── POST /api/drive/my-scan ───────────────────────────────────────────────────
+@router.post("/my-scan")
+async def start_my_drive_scan(
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Starts a deep scan of the user's OWN Google Drive (root + all subfolders).
+    Uses their personal OAuth token — NOT the service account.
+    """
+    creds = _get_user_oauth_creds(current_user["id"])
+    if not creds or not creds.valid:
+        raise HTTPException(status_code=403, detail="Drive not connected.")
+
+    # Prevent duplicate scans from auto-reconnects/multiple triggers
+    db = get_firestore()
+    try:
+        existing_active = db.collection("scan_jobs")\
+            .where("user_id", "==", current_user["id"])\
+            .where("status", "in", ["queued", "connecting", "fetching", "scanning", "indexing"])\
+            .limit(1)\
+            .stream()
+        
+        for doc in existing_active:
+            logger.info(f"[MY SCAN] User {current_user['id']} already has active scan job {doc.id}, returning existing ID.")
+            return {"job_id": doc.id}
+    except Exception as e:
+        logger.warning(f"[MY SCAN] Error checking existing scan jobs: {e}")
+
+    job_id = str(uuid.uuid4())
+    initial_job_state = {
+        "status": "queued",
+        "user_id": current_user["id"],
+        "scanned": 0,
+        "total": 0,
+        "current_file": "Initializing scan traversal...",
+        "files": [],
+        "failed": [],
+        "folder_count": 0,
+        "file_count": 0,
+        "supported_files_count": 0,
+        "indexed_files_count": 0,
+        "progress": 0
+    }
+    
+    # Store initial state in our thread-safe manager
+    scan_manager.create_job(job_id, initial_job_state)
+
+    background_tasks.add_task(deep_scan_user_drive, job_id, current_user["id"])
+    return {"job_id": job_id}
+
+
+async def deep_scan_user_drive(job_id: str, uid: str):
+    """
+    Recursively scans ALL folders and files in the user's My Drive.
+    Updates counts live, and updates the scan status in both memory and Firestore.
+    """
+    logger.info(f"[MY SCAN] Starting deep scan background task for user {uid}, job {job_id}")
+    try:
+        # Step 1: Connecting
+        scan_manager.update_job(job_id, {
+            "status": "connecting",
+            "current_file": "Connecting to Google Drive..."
+        })
+        
+        creds = await asyncio.to_thread(_get_user_oauth_creds, uid)
+        if not creds or not creds.valid:
+            scan_manager.finalize_job(job_id, "failed", "Google Drive not connected.")
+            return
+
+        service = await asyncio.to_thread(gdrive_build, "drive", "v3", credentials=creds, static_discovery=True)
+
+        db = get_firestore()
+        user_doc = await asyncio.to_thread(db.collection("users").document(uid).get)
+        user_data = user_doc.to_dict() or {}
+        email = user_data.get("email") or str(uid)
+
+        # Step 2: Fetching
+        scan_manager.update_job(job_id, {
+            "status": "fetching",
+            "current_file": "Initializing My Drive scan..."
+        })
+        
+        # Step 3: Scanning (traversal)
+        scan_manager.update_job(job_id, {
+            "status": "scanning",
+            "current_file": "Scanning folders and files..."
+        })
+
+        folders_to_visit = [("root", "My Drive")]
+        visited_folders = set()
+        total_folders = 0
+        total_files_scanned = 0
+
+        while folders_to_visit:
+            # Yield control for cancellation checks
+            await asyncio.sleep(0.01)
+
+            # Check prioritized queue from the ScanManager state
+            prioritized = []
+            with scan_manager.lock:
+                job_data = scan_manager._jobs.get(job_id)
+                if job_data and job_data.get("prioritized_queue"):
+                    prioritized = job_data["prioritized_queue"].copy()
+                    job_data["prioritized_queue"] = []  # Clear after reading
+            
+            # If there are prioritized folders, insert them at the front of BFS queue
+            for p_fid, p_path in reversed(prioritized):
+                if p_fid not in visited_folders:
+                    folders_to_visit.insert(0, (p_fid, p_path))
+            
+            if not folders_to_visit:
+                break
+
+            current_fid, folder_path = folders_to_visit.pop(0)
+            if current_fid in visited_folders:
+                continue
+            visited_folders.add(current_fid)
+            total_folders += 1
+
+            page_token = None
+            while True:
+                await asyncio.sleep(0.01)
+                
+                # Execute blocking file listing in a thread pool
+                results = await asyncio.to_thread(
+                    lambda: service.files().list(
+                        q=f"'{current_fid}' in parents and trashed=false",
+                        fields="nextPageToken, files(id, name, mimeType, size, modifiedTime, webViewLink)",
+                        pageSize=150,
+                        pageToken=page_token
+                    ).execute()
+                )
+
+                items = results.get("files", [])
+                new_files_this_page = []
+                for item in items:
+                    total_files_scanned += 1
+                    item_name = item.get("name", "")
+                    item_mime = item.get("mimeType", "")
+
+                    if item_mime == "application/vnd.google-apps.folder":
+                        folders_to_visit.append((item["id"], f"{folder_path}/{item_name}"))
+                    elif item_mime != "application/vnd.google-apps.folder":
+                        file_entry = {
+                            "id": item["id"],
+                            "name": item_name,
+                            "folder_name": folder_path.split("/")[-1],
+                            "full_path": f"{folder_path}/{item_name}",
+                            "drive_web_link": item.get("webViewLink", ""),
+                            "size": int(item.get("size", 0)) if item.get("size") else 0,
+                            "mimeType": item_mime,
+                            "modifiedTime": item.get("modifiedTime", ""),
+                        }
+                        new_files_this_page.append(file_entry)
+
+                if new_files_this_page:
+                    # Append new files to the job's files list immediately
+                    with scan_manager.lock:
+                        job_data = scan_manager._jobs.get(job_id)
+                        if job_data:
+                            files_list = job_data.get("files", [])
+                            existing_ids = {f["id"] for f in files_list}
+                            for nf in new_files_this_page:
+                                if nf["id"] not in existing_ids:
+                                    files_list.append(nf)
+                            scan_manager._jobs[job_id]["files"] = files_list
+                    
+                    # Persist immediately to trigger UI update
+                    job_data = scan_manager.get_job(job_id)
+                    if job_data:
+                        scan_manager.update_job(job_id, {"files": job_data["files"]})
+
+                # Keep live progress counts updated
+                progress_pct = 0
+                if total_folders + len(folders_to_visit) > 0:
+                    progress_pct = min(99, int((total_folders / (total_folders + len(folders_to_visit))) * 100))
+
+                scan_manager.update_job(job_id, {
+                    "folder_count": total_folders,
+                    "file_count": total_files_scanned,
+                    "scanned": total_files_scanned,
+                    "current_file": f"Scanning: Discovered {total_folders} folders, {total_files_scanned} files...",
+                    "progress": progress_pct
+                })
+
+                page_token = results.get("nextPageToken")
+                if not page_token:
+                    break
+
+        # Step 4: Completed State
+        scan_manager.update_job(job_id, {
+            "status": "completed",
+            "current_file": "Scanning complete!",
+            "progress": 100
+        })
+        logger.info(f"[MY SCAN] Deep scan completed successfully for user {uid}. Discovered {total_files_scanned} files across {total_folders} folders.")
+
+    except asyncio.CancelledError:
+        logger.warning(f"[MY SCAN] Task {job_id} cancelled (server reload/shutdown). Marking state as cancelled.")
+        scan_manager.finalize_job(job_id, "cancelled", "Scan interrupted due to server reload/restart.")
+    except Exception as e:
+        logger.error(f"[MY SCAN] Fatal error in deep scan job {job_id}: {e}", exc_info=True)
+        scan_manager.finalize_job(job_id, "failed", f"Fatal scan failure: {str(e)}")
+
+
+@router.get("/scan/{job_id}")
+async def get_scan_status(job_id: str, offset: int = 0, current_user=Depends(get_current_user)):
+    """Fetches real-time scanning status from high-speed memory or Firestore with offset support."""
+    job_data = scan_manager.get_job(job_id)
+    if not job_data:
+        return {"status": "not_found", "scanned": 0, "total": 0}
+        
+    all_files = job_data.get("files", [])
+    sliced_files = all_files[offset:]
+    
+    result = job_data.copy()
+    result["files"] = sliced_files
+    result["total_discovered_files"] = len(all_files)
+    return result
+
+
+@router.post("/scan/{job_id}/prioritize")
+async def prioritize_folder(job_id: str, body: dict, current_user=Depends(get_current_user)):
+    folder_id = body.get("folder_id")
+    folder_name = body.get("folder_name", "Prioritized Folder")
+    if not folder_id:
+        raise HTTPException(status_code=400, detail="folder_id is required")
+        
+    job_data = scan_manager.get_job(job_id)
+    if not job_data:
+        raise HTTPException(status_code=404, detail="Scan job not found")
+        
+    with scan_manager.lock:
+        if job_id not in scan_manager._jobs:
+            scan_manager._jobs[job_id] = {}
+        if "prioritized_queue" not in scan_manager._jobs[job_id]:
+            scan_manager._jobs[job_id]["prioritized_queue"] = []
+            
+        p_q = scan_manager._jobs[job_id]["prioritized_queue"]
+        if folder_id not in [f[0] for f in p_q]:
+            p_q.append((folder_id, folder_name))
+            
+    logger.info(f"[MY SCAN] Prioritized folder {folder_id} ({folder_name}) for job {job_id}")
+    return {"success": True}
+
+
+# ── POST /api/drive/index ─────────────────────────────────────────────────────
+@router.post("/index")
+async def index_drive_file(
+    body: dict,
+    current_user: dict = Depends(get_current_user),
+):
+    """Secure OAuth-based single-file indexing wrapper."""
+    drive_file_id = body.get("file_id", "").strip()
+    if not drive_file_id:
+        raise HTTPException(status_code=400, detail="file_id is required")
+
+    creds = _get_user_oauth_credentials(current_user["id"])
+    if not creds or not creds.valid:
+        raise HTTPException(status_code=403, detail="Google Drive not connected.")
+
+    try:
+        service = gdrive_build("drive", "v3", credentials=creds, static_discovery=True)
+        meta = service.files().get(
+            fileId=drive_file_id,
+            fields="name,mimeType",
+            supportsAllDrives=True
+        ).execute()
+
+        filename = meta.get("name", "drive_file")
+        mime_type = meta.get("mimeType", "")
+
+        if not any(mime_type.startswith(p) for p in ALLOWED_MIME_PREFIXES):
+            raise HTTPException(
+                status_code=415,
+                detail=f"File type '{mime_type}' is not supported for indexing."
+            )
+
+        db = get_firestore()
+        user_doc = db.collection("users").document(current_user["id"]).get()
+        user_data = user_doc.to_dict() or {}
+        email = user_data.get("email") or current_user.get("email") or str(current_user["id"])
+
+        res = index_single_user_file_helper(service, db, drive_file_id, filename, mime_type, current_user["id"], email)
+        return {
+            "success": True,
+            "doc_id": res.get("doc_id"),
+            "drive_file_id": drive_file_id,
+            "filename": filename,
+            "chunks": res.get("chunks", 0),
+        }
+    except Exception as e:
+        logger.error(f"[DRIVE INDEX] Route error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/index-status")
 async def get_index_status(
@@ -695,13 +814,48 @@ async def get_index_status(
     return {"indexed": False, "chunk_count": 0}
 
 
-# ── GET /api/drive/folders ────────────────────────────────────────────────────
+# ── GET /api/drive/files/{file_id}/preview ─────────────────────────────────────
+@router.get("/files/{file_id}/preview")
+async def get_file_preview(
+    file_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Returns AI-generated index summary, key terms, language, and preview from Firestore."""
+    db = get_firestore()
+    docs = (
+        db.collection("drive_indexed_files")
+        .where("drive_file_id", "==", file_id)
+        .where("user_id", "==", current_user["id"])
+        .limit(1)
+        .stream()
+    )
+    for doc in docs:
+        data = doc.to_dict()
+        return {
+            "doc_id": data.get("doc_id"),
+            "drive_file_id": data.get("drive_file_id"),
+            "filename": data.get("filename"),
+            "summary": data.get("summary", "This document has been indexed and is fully searchable."),
+            "key_topics": data.get("key_topics", []),
+            "important_entities": data.get("important_entities", []),
+            "content_preview": data.get("content_preview", "") or (data.get("summary", "")[:300] if data.get("summary") else ""),
+            "page_count": data.get("page_count", "N/A"),
+            "language": data.get("language", "English"),
+            "full_path": data.get("full_path") or f"My Drive/{data.get('filename')}",
+        }
+    raise HTTPException(status_code=404, detail="File preview not found or not indexed yet.")
 
+
+# ── GET /api/drive/folders ────────────────────────────────────────────────────
 @router.get("/folders")
 async def get_nexora_folders(
     folder_id: str = NEXORA_FOLDER_ID,
     current_user=Depends(get_current_user),
 ):
+    """Get folder listings — strictly validated to logged-in user credentials."""
+    creds = _get_user_oauth_credentials(current_user["id"])
+    if not creds or not creds.valid:
+        raise HTTPException(status_code=403, detail="Drive not connected.")
     try:
         return list_folder_contents(folder_id)
     except Exception as e:
@@ -710,9 +864,12 @@ async def get_nexora_folders(
 
 
 # ── GET /api/drive/folders/{folder_id}/contents ───────────────────────────────
-
 @router.get("/folders/{folder_id}/contents")
 async def get_folder_contents(folder_id: str, current_user=Depends(get_current_user)):
+    """Retrieve subfolders/files lists — strictly authenticated."""
+    creds = _get_user_oauth_credentials(current_user["id"])
+    if not creds or not creds.valid:
+        raise HTTPException(status_code=403, detail="Drive not connected.")
     try:
         return list_folder_contents(folder_id)
     except Exception as e:
@@ -721,9 +878,11 @@ async def get_folder_contents(folder_id: str, current_user=Depends(get_current_u
 
 
 # ── POST /api/drive/folders ───────────────────────────────────────────────────
-
 @router.post("/folders")
 async def create_drive_folder(body: dict, current_user=Depends(get_current_user)):
+    creds = _get_user_oauth_credentials(current_user["id"])
+    if not creds or not creds.valid:
+        raise HTTPException(status_code=403, detail="Drive not connected.")
     folder_name = body.get("name", "").strip()
     parent_id = body.get("parent_id", NEXORA_FOLDER_ID)
 
@@ -738,9 +897,11 @@ async def create_drive_folder(body: dict, current_user=Depends(get_current_user)
 
 
 # ── DELETE /api/drive/items/{item_id} ────────────────────────────────────────
-
 @router.delete("/items/{item_id}")
 async def delete_item(item_id: str, current_user=Depends(get_current_user)):
+    creds = _get_user_oauth_credentials(current_user["id"])
+    if not creds or not creds.valid:
+        raise HTTPException(status_code=403, detail="Drive not connected.")
     success = delete_drive_item(item_id)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to delete item")
@@ -748,13 +909,15 @@ async def delete_item(item_id: str, current_user=Depends(get_current_user)):
 
 
 # ── POST /api/drive/upload ────────────────────────────────────────────────────
-
 @router.post("/upload")
 async def upload_to_drive(
     file: UploadFile = File(...),
     folder_id: str = UPLOAD_FOLDER_ID,
     current_user=Depends(get_current_user),
 ):
+    creds = _get_user_oauth_credentials(current_user["id"])
+    if not creds or not creds.valid:
+        raise HTTPException(status_code=403, detail="Drive not connected.")
     try:
         file_bytes = await file.read()
         return upload_file_to_drive(
@@ -768,27 +931,30 @@ async def upload_to_drive(
 
 
 # ── GET /api/drive/recent ─────────────────────────────────────────────────────
-
 @router.get("/recent")
 async def get_recent(current_user=Depends(get_current_user)):
     return {"files": []}
 
 
 # ── GET /api/drive/files/{file_id}/download ───────────────────────────────────
-
 @router.get("/files/{file_id}/download")
 async def download_file_proxy(file_id: str, current_user=Depends(get_current_user)):
+    """Downloads user-specific Drive documents directly via proxy stream — 100% OAuth."""
     try:
-        service = get_drive_service()
+        creds = _get_user_oauth_credentials(current_user["id"])
+        if not creds or not creds.valid:
+            raise HTTPException(status_code=403, detail="Drive not connected.")
+            
+        service = gdrive_build("drive", "v3", credentials=creds, static_discovery=True)
         meta = (
             service.files()
-            .get(fileId=file_id, fields="name,mimeType", supportsAllDrives=True)
+            .get(fileId=file_id, fields="name,mimeType")
             .execute()
         )
         filename = meta.get("name", "download")
         mime = meta.get("mimeType", "application/octet-stream")
 
-        request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+        request = service.files().get_media(fileId=file_id)
         fh = io.BytesIO()
         downloader = MediaIoBaseDownload(fh, request)
         done = False
@@ -807,15 +973,19 @@ async def download_file_proxy(file_id: str, current_user=Depends(get_current_use
 
 
 # ── GET /api/drive/search ─────────────────────────────────────────────────────
-
 @router.get("/search")
 async def search_drive(
     q: str = "",
     folder: str = "all",
     current_user=Depends(get_current_user),
 ):
+    """Searches files in the active user's actual connected Google Drive My Drive."""
     try:
-        service = get_drive_service()
+        creds = _get_user_oauth_credentials(current_user["id"])
+        if not creds or not creds.valid:
+            raise HTTPException(status_code=403, detail="Drive not connected.")
+            
+        service = gdrive_build("drive", "v3", credentials=creds, static_discovery=True)
         query_parts = ["trashed=false"]
 
         if q:
@@ -824,16 +994,13 @@ async def search_drive(
 
         if folder != "all":
             query_parts.append(f"'{folder}' in parents")
-        else:
-            query_parts.append(f"'{settings.NEXORA_DRIVE_FOLDER_ID}' in parents")
 
         results = (
             service.files()
             .list(
                 q=" and ".join(query_parts),
                 fields="files(id, name, size, mimeType, modifiedTime, webViewLink)",
-                supportsAllDrives=True,
-                includeItemsFromAllDrives=True,
+                pageSize=150
             )
             .execute()
         )

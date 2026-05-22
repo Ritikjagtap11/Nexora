@@ -22,16 +22,12 @@ from app.auth.deps import get_current_user
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-FALLBACK_QUESTIONS = [
-    "What is this document about?",
-    "Summarize the key points",
-    "What are the main topics covered?",
-    "List the important sections",
-]
+FALLBACK_QUESTIONS = []
 
 
 class SuggestedQuestionsRequest(BaseModel):
     document_ids: List[str]
+    conversation_history: List[dict] = []
 
 
 @router.post("/suggested-questions")
@@ -40,7 +36,7 @@ async def get_suggested_questions(
     current_user: dict = Depends(get_current_user),   # auth required
 ):
     if not body.document_ids:
-        return {"questions": FALLBACK_QUESTIONS}
+        return {"questions": []}
 
     try:
         # Pull chunks directly from FAISS using the same embedding_service
@@ -62,28 +58,38 @@ async def get_suggested_questions(
                 f"suggested_questions: no chunks found for docs "
                 f"{body.document_ids} / user {current_user['id']}"
             )
-            return {"questions": FALLBACK_QUESTIONS}
+            return {"questions": []}
 
         context = "\n\n".join(all_chunks)[:2000]
-        questions = await _generate_questions(context)
+        questions = await _generate_questions(context, body.conversation_history)
         return {"questions": questions}
 
     except Exception as e:
         logger.error(f"suggested_questions error: {e}")
-        return {"questions": FALLBACK_QUESTIONS}
+        return {"questions": []}
 
 
-async def _generate_questions(context: str) -> List[str]:
+async def _generate_questions(context: str, conversation_history: List[dict] = []) -> List[str]:
     """Generate 4 short questions. Tries Gemini, then Ollama, then fallback."""
 
     SYSTEM = (
-        "You generate exactly 4 short questions a user would naturally ask about a document. "
-        "Questions must be directly answerable from the provided text. "
-        "Each question must be under 10 words. "
+        "You generate exactly 4 short, highly relevant, and unique follow-up questions a user would naturally ask next about the documents, "
+        "based on the provided document excerpts and the ongoing conversation history. "
+        "Each question must be directly answerable from the provided document excerpts. "
+        "Do NOT repeat questions that have already been asked or answered in the conversation. "
+        "Each question must be under 12 words and feel organic. "
         "Return ONLY valid JSON — no markdown fences, no explanation. "
         'Format: {"questions": ["Q1?", "Q2?", "Q3?", "Q4?"]}'
     )
-    PROMPT = f"Document excerpts:\n{context}\n\nGenerate 4 questions:"
+    
+    history_str = ""
+    if conversation_history:
+        history_str = "\n\nConversation History:\n" + "\n".join(
+            f"{msg.get('role', 'user').capitalize()}: {msg.get('content', '')}"
+            for msg in conversation_history[-4:]  # last 4 messages
+        )
+
+    PROMPT = f"Document excerpts:\n{context}\n{history_str}\n\nBased on the document excerpts and conversation history, generate 4 unique next suggested questions for the user to explore the documents further:"
 
     # Try Gemini first
     try:
@@ -134,4 +140,4 @@ async def _generate_questions(context: str) -> List[str]:
     except Exception as e:
         logger.warning(f"Ollama question generation failed: {e}")
 
-    return FALLBACK_QUESTIONS
+    return []

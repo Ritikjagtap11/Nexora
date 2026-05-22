@@ -50,18 +50,10 @@ function ChatPageInner() {
             sendMessageRef={sendMessageRef}
             loadedSession={loadedSession}
             onNewChat={handleNewChat}
+            onToggleSidebar={() => setMobileSidebarOpen(true)}
           />
         </div>
       </div>
-
-      {/* Mobile Toggle FAB */}
-      <button
-        onClick={() => setMobileSidebarOpen(true)}
-        className="fixed bottom-6 right-6 z-[1000] lg:hidden bg-primary hover:bg-primary/95 text-white p-3.5 rounded-full shadow-lg shadow-primary/20 hover:scale-105 active:scale-95 transition-all duration-200 flex items-center justify-center border border-white/10"
-        aria-label="Toggle Sidebar"
-      >
-        <Menu className="w-6 h-6" />
-      </button>
 
       {/* Mobile Sidebar Drawer Overlay */}
       {mobileSidebarOpen && (

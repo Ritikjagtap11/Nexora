@@ -13,6 +13,13 @@ async def lifespan(app: FastAPI):
     connect_to_firebase()
     from app.services.drive_service import drive_service
     drive_service.init_drive()
+    # Clean up active scans interrupted by a server shutdown or reload
+    try:
+        from app.routes.drive import scan_manager
+        scan_manager.mark_all_active_as_cancelled()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Error running scan cleanup on startup: {e}")
     yield
 
 app = FastAPI(

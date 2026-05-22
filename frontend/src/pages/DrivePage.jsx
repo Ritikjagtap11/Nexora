@@ -562,7 +562,7 @@ const FileCard = ({ file, searchQuery, theme, indexedDriveFileIds, backgroundDoc
   const typeInfo = getFileTypeInfo(file.mimeType, file.name);
   const fullPath = file.full_path || file.folderPath || 'NEXORA';
 
-  const ALLOWED_EXTENSIONS = ['pdf', 'docx', 'txt', 'md', 'csv', 'pptx', 'xlsx'];
+  const ALLOWED_EXTENSIONS = ['pdf', 'docx', 'txt'];
   const ext = file.name?.split('.').pop()?.toLowerCase();
   const isIndexable = ALLOWED_EXTENSIONS.includes(ext);
 
@@ -625,10 +625,28 @@ const FileCard = ({ file, searchQuery, theme, indexedDriveFileIds, backgroundDoc
           <FileTypeIcon type={typeInfo.iconType} color={typeInfo.color} size={28} />
         </div>
 
-        {/* Extension badge — pill shaped with bold color */}
+        {/* Extension badges row */}
         <div style={{
-          display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px',
+          display: 'flex', alignItems: 'center', gap: '8px',
         }}>
+          {isIndexable && (
+            <span style={{
+              fontSize: '10px',
+              fontWeight: 800,
+              letterSpacing: '0.05em',
+              color: '#F95F9E',
+              background: 'rgba(249, 95, 158, 0.12)',
+              border: '1.5px solid rgba(249, 95, 158, 0.25)',
+              padding: '3px 10px',
+              borderRadius: '99px',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '4px',
+              lineHeight: 1.4,
+            }}>
+              ✨ Indexable
+            </span>
+          )}
           <span style={{
             fontSize: '10px',
             fontWeight: 800,
@@ -748,12 +766,29 @@ export default function DrivePage() {
     indexedDriveFileIds,
     deepScanState,
     startPersistentDeepScan,
+    stopDeepScanPolling,
     indexDriveFile,
     retryDriveFileIndex,
     indexDriveFolder,
+    driveConnected,
+    setDriveConnected,
+    myDriveFolders,
+    setMyDriveFolders,
+    myDriveFiles,
+    setMyDriveFiles,
+    myDriveLoading,
+    myDriveError,
+    currentFolderId,
+    setCurrentFolderId,
+    folderBreadcrumb,
+    setFolderBreadcrumb,
+    loadMyDrive,
+    handleFolderClick: ctxHandleFolderClick,
+    handleBreadcrumbClick: ctxHandleBreadcrumbClick,
+    checkDriveConnection,
   } = useBackgroundTasks();
 
-  const { scanStatus, scanProgress, scannedFiles, scanJobId } = deepScanState;
+  const { scanStatus, scanProgress, scannedFiles, scanJobId, backendStatus } = deepScanState;
 
   // ── helpers ────────────────────────────────────────────────────────
   const BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
@@ -767,15 +802,7 @@ export default function DrivePage() {
   };
 
   // ── OAuth / connection state ────────────────────────────────────────
-  const [driveConnected, setDriveConnected] = useState(null); // null=checking
   const [connectLoading, setConnectLoading] = useState(false);
-
-  // ── My Drive browser state ──────────────────────────────────────────
-  const [myDriveFolders, setMyDriveFolders] = useState([]);
-  const [myDriveFiles, setMyDriveFiles] = useState([]);
-  const [myDriveLoading, setMyDriveLoading] = useState(false);
-  const [currentFolderId, setCurrentFolderId] = useState('root');
-  const [folderBreadcrumb, setFolderBreadcrumb] = useState([{ id: 'root', name: 'My Drive' }]);
 
   // ── Other UI state ─────────────────────────────────────────────────
   const [searchQuery, setSearchQuery] = useState('');
@@ -783,62 +810,26 @@ export default function DrivePage() {
   const [hoveredFolder, setHoveredFolder] = useState(null);
   const [viewMode, setViewMode] = useState('myDrive'); // myDrive | scan
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(60);
 
   const pollRef = useRef(null);
 
-  // ── On mount: check connection status ──────────────────────────────
+  // ── On mount: handle OAuth redirect param check if any ──────────────────────────────
   useEffect(() => {
-    let ignore = false;
-
-    const init = async () => {
-      try {
-        // Check if just returned from OAuth
-        const params = new URLSearchParams(window.location.search);
-        const justConnected = params.get('connected') === 'true';
-        if (justConnected) window.history.replaceState({}, '', window.location.pathname);
-
-        const res = await authFetch('/api/drive/status');
-        if (ignore) return;
-        const data = await res.json();
-        const connected = data.connected || justConnected;
-        setDriveConnected(connected);
-
-        if (connected) {
-          loadMyDrive('root');
-        }
-      } catch {
-        if (!ignore) {
-          setDriveConnected(false);
-        }
-      }
-    };
-    init();
-
+    const params = new URLSearchParams(window.location.search);
+    const justConnected = params.get('connected') === 'true';
+    if (justConnected) {
+      window.history.replaceState({}, '', window.location.pathname);
+      checkDriveConnection();
+    }
     return () => {
-      ignore = true;
-      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+      stopDeepScanPolling();
     };
   }, []);
 
-  // ── Restore scan results from sessionStorage on navigation ─────────
-  const restoreScanFromSession = () => {};
-
-  // ── Load My Drive folders+files for a given folder ──────────────────
-  const loadMyDrive = async (folderId = 'root', folderName = 'My Drive') => {
-    setMyDriveLoading(true);
-    try {
-      const res = await authFetch(`/api/drive/my-drive?folder_id=${folderId}`);
-      if (!res.ok) throw new Error('Failed');
-      const data = await res.json();
-      setMyDriveFolders(data.folders || []);
-      setMyDriveFiles(data.files || []);
-      setCurrentFolderId(folderId);
-    } catch (err) {
-      console.error('My Drive load error:', err);
-    } finally {
-      setMyDriveLoading(false);
-    }
-  };
+  useEffect(() => {
+    setVisibleCount(60);
+  }, [searchQuery, viewMode]);
 
   // ── OAuth connect ──────────────────────────────────────────────────
   const handleConnectDrive = async () => {
@@ -871,17 +862,17 @@ export default function DrivePage() {
 
   // ── Folder navigation (My Drive browser) ──────────────────────────
   const handleFolderClick = (folder) => {
-    setFolderBreadcrumb(prev => [...prev, { id: folder.id, name: folder.name }]);
-    loadMyDrive(folder.id, folder.name);
+    ctxHandleFolderClick(folder);
     setViewMode('myDrive');
     setMobileSidebarOpen(false);
+    setVisibleCount(60);
   };
 
   const handleBreadcrumbClick = (crumb, index) => {
-    setFolderBreadcrumb(prev => prev.slice(0, index + 1));
-    loadMyDrive(crumb.id, crumb.name);
+    ctxHandleBreadcrumbClick(crumb, index);
     setViewMode('myDrive');
     setMobileSidebarOpen(false);
+    setVisibleCount(60);
   };
 
   // ── Deep Scan (user's own drive) ───────────────────────────────────
@@ -889,6 +880,7 @@ export default function DrivePage() {
     setViewMode('scan');
     startPersistentDeepScan();
     setMobileSidebarOpen(false);
+    setVisibleCount(60);
   };
 
   // ── Search filter ──────────────────────────────────────────────────
@@ -1417,7 +1409,16 @@ export default function DrivePage() {
             )}
 
             {/* Content area */}
-            <div style={{ flex: 1, overflowY: 'auto' }} className="drive-sb">
+            <div
+              style={{ flex: 1, overflowY: 'auto' }}
+              className="drive-sb"
+              onScroll={(e) => {
+                const { scrollHeight, scrollTop, clientHeight } = e.currentTarget;
+                if (scrollHeight - scrollTop - clientHeight < 150) {
+                  setVisibleCount(prev => prev + 60);
+                }
+              }}
+            >
 
               {/* ── MY DRIVE VIEW ──────────────────────────────────── */}
               {viewMode === 'myDrive' && (
@@ -1488,7 +1489,7 @@ export default function DrivePage() {
                       <div className="file-grid" style={{ padding: 0 }}>
                         {myDriveFiles.filter(f =>
                           !searchQuery || f.name?.toLowerCase().includes(searchQuery.toLowerCase())
-                        ).map(file => (
+                        ).slice(0, visibleCount).map(file => (
                           <FileCard
                             key={file.id}
                             file={file}
@@ -1523,55 +1524,161 @@ export default function DrivePage() {
               {viewMode === 'scan' && (
                 <div>
                   {/* Scan progress bar — shows during and after scan */}
-                  {(scanStatus === 'running' || scanStatus === 'complete') && (
-                    <div style={{ padding: '20px 24px 12px', animation: 'fadeUp .2s ease both' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                          {scanStatus === 'running' && (
-                            <span style={{
-                              width: '18px', height: '18px', flexShrink: 0,
-                              border: `2.5px solid rgba(249,95,158,0.18)`,
-                              borderTop: '2.5px solid #F95F9E', borderRadius: '50%',
-                              animation: 'spin 0.9s linear infinite',
-                            }} />
-                          )}
-                          {scanStatus === 'complete' && (
-                            <CheckCircle size={18} style={{ color: '#22c55e', flexShrink: 0 }} />
-                          )}
-                          <div>
-                            <p style={{ fontSize: '14px', fontWeight: 600, color: t.textPrimary, margin: 0 }}>
-                              {scanStatus === 'running' ? 'Scanning your Google Drive…' : 'Scan Complete'}
-                            </p>
-                            {scanProgress.current_file && scanStatus === 'running' && (
+                  {/* Premium Scan Status Card */}
+                  {/* Premium Scan Status Card */}
+                  {scanStatus !== 'idle' && (
+                    <div style={{ padding: '24px', animation: 'fadeUp 0.3s cubic-bezier(0.16, 1, 0.3, 1) both' }}>
+                      <div style={{
+                        background: isDarkMode ? 'rgba(30, 41, 59, 0.65)' : 'rgba(255, 255, 255, 0.75)',
+                        backdropFilter: 'blur(20px)',
+                        border: '1.5px solid rgba(249, 95, 158, 0.28)',
+                        borderRadius: '24px',
+                        padding: '28px',
+                        boxShadow: '0 8px 32px rgba(249, 95, 158, 0.12), inset 0 1px 2px rgba(255, 255, 255, 0.05)',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '20px',
+                      }}>
+                        {/* Header Row */}
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                            <div style={{
+                              width: '42px', height: '42px', borderRadius: '12px',
+                              background: 'rgba(249, 95, 158, 0.15)',
+                              border: '1px solid rgba(249, 95, 158, 0.25)',
+                              display: 'flex', alignItems: 'center', justifyContent: 'center',
+                              flexShrink: 0
+                            }}>
+                              {scanStatus === 'running' ? (
+                                <div style={{
+                                  width: '20px', height: '20px', borderRadius: '50%',
+                                  border: '2.5px solid rgba(249,95,158,0.18)',
+                                  borderTop: '2.5px solid #F95F9E',
+                                  animation: 'spin 0.9s linear infinite',
+                                }} />
+                              ) : scanStatus === 'complete' ? (
+                                <CheckCircle size={20} style={{ color: '#22c55e' }} />
+                              ) : (
+                                <X size={20} style={{ color: '#ef4444' }} />
+                              )}
+                            </div>
+                            <div>
+                              <h3 style={{ fontSize: '16px', fontWeight: 700, color: t.textPrimary, margin: 0 }}>
+                                {backendStatus === 'queued' && 'Queued in scan worker pool...'}
+                                {backendStatus === 'connecting' && 'Connecting to Google Drive...'}
+                                {backendStatus === 'fetching' && 'Fetching Drive directory structure...'}
+                                {backendStatus === 'scanning' && 'Traversing & Scanning Directories...'}
+                                {backendStatus === 'indexing' && 'Optimizing & Indexing Documents...'}
+                                {(backendStatus === 'completed' || backendStatus === 'complete' || scanStatus === 'complete') && 'Deep Scan & Indexing Complete!'}
+                                {(backendStatus === 'failed' || scanStatus === 'failed') && 'Deep Scan Failed'}
+                                {(backendStatus === 'cancelled' || scanStatus === 'cancelled') && 'Deep Scan Interrupted / Cancelled'}
+                                {!backendStatus && scanStatus === 'running' && 'Scanning Google Drive...'}
+                              </h3>
                               <p style={{
-                                fontSize: '11px', color: t.textSecondary,
-                                margin: '2px 0 0', maxWidth: '380px',
+                                fontSize: '12px', color: t.textSecondary,
+                                margin: '4px 0 0', maxWidth: '480px',
                                 overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                               }}>
-                                📄 {scanProgress.current_file}
+                                {scanStatus === 'cancelled'
+                                  ? 'Scan interrupted due to server reload/restart.'
+                                  : (scanProgress.current_file ? `📂 ${scanProgress.current_file}` : 'Waiting for traversal response...')}
                               </p>
-                            )}
+                            </div>
+                          </div>
+
+                          <div style={{
+                            fontSize: '14px', fontWeight: 800, color: '#F95F9E',
+                            background: 'rgba(249,95,158,0.12)', border: '1px solid rgba(249,95,158,0.2)',
+                            padding: '6px 14px', borderRadius: '12px'
+                          }}>
+                            {scanStatus === 'complete' ? '100%' : `${scanProgress.progress || 0}%`}
                           </div>
                         </div>
-                        <span style={{ fontSize: '13px', fontWeight: 700, color: '#F95F9E' }}>
-                          {scannedFiles.length > 0
-                            ? `${scannedFiles.length} file${scannedFiles.length !== 1 ? 's' : ''} found`
-                            : 'Scanning…'
-                          }
-                          {scanProgress.current_file && scanStatus === 'running' ? '' : ''}
-                        </span>
-                      </div>
 
-                      {/* Progress line */}
-                      <div style={{ height: '6px', background: t.scanBarBg, borderRadius: '99px', overflow: 'hidden', maxWidth: '500px' }}>
+                        {/* Progress Bar Container */}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                          <div style={{
+                            height: '8px', background: isDarkMode ? 'rgba(255, 255, 255, 0.05)' : '#F1F5F9',
+                            borderRadius: '99px', overflow: 'hidden', position: 'relative'
+                          }}>
+                            <div style={{
+                              height: '100%',
+                              width: scanStatus === 'complete' ? '100%' : `${scanProgress.progress || 0}%`,
+                              background: 'linear-gradient(90deg,#F95F9E,#FC9CBF)',
+                              borderRadius: '99px',
+                              boxShadow: '0 0 12px rgba(249,95,158,0.6)',
+                              transition: 'width 0.4s cubic-bezier(0.4, 0, 0.2, 1)',
+                              animation: (scanStatus === 'running' && backendStatus === 'scanning') ? 'indeterminate 1.6s infinite' : 'none',
+                            }} />
+                          </div>
+                        </div>
+
+                        {/* Live Counts Dashboard Grid */}
                         <div style={{
-                          height: '100%',
-                          width: scanStatus === 'complete' ? '100%' : '60%',
-                          background: 'linear-gradient(90deg,#F95F9E,#FC9CBF)',
-                          borderRadius: '99px',
-                          transition: scanStatus === 'complete' ? 'width 0.6s ease' : 'none',
-                          animation: scanStatus === 'running' ? 'indeterminate 1.6s infinite' : 'none',
-                        }} />
+                          display: 'grid',
+                          gridTemplateColumns: 'repeat(2, 1fr)',
+                          gap: '14px',
+                          marginTop: '4px'
+                        }}>
+                          {/* Folders count */}
+                          <div style={{
+                            background: isDarkMode ? 'rgba(255,255,255,0.03)' : 'rgba(249,95,158,0.02)',
+                            border: `1px solid ${t.border}`,
+                            borderRadius: '16px', padding: '14px',
+                            display: 'flex', flexDirection: 'column', gap: '4px'
+                          }}>
+                            <span style={{ fontSize: '11px', color: t.textSecondary, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                              Folders Scanned
+                            </span>
+                            <span style={{ fontSize: '20px', fontWeight: 800, color: t.textPrimary }}>
+                              {scanProgress.folder_count || 0}
+                            </span>
+                          </div>
+
+                          {/* Files count */}
+                          <div style={{
+                            background: isDarkMode ? 'rgba(255,255,255,0.03)' : 'rgba(249,95,158,0.02)',
+                            border: `1px solid ${t.border}`,
+                            borderRadius: '16px', padding: '14px',
+                            display: 'flex', flexDirection: 'column', gap: '4px'
+                          }}>
+                            <span style={{ fontSize: '11px', color: t.textSecondary, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                              Files Discovered
+                            </span>
+                            <span style={{ fontSize: '20px', fontWeight: 800, color: t.textPrimary }}>
+                              {scanProgress.file_count || 0}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Footer Action for Failed/Cancelled */}
+                        {(scanStatus === 'failed' || scanStatus === 'cancelled') && (
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-start', marginTop: '10px' }}>
+                            <button
+                              onClick={startPersistentDeepScan}
+                              className="scan-btn"
+                              style={{
+                                padding: '10px 24px',
+                                background: 'linear-gradient(135deg,#F95F9E,#FC9CBF)',
+                                color: 'white',
+                                border: 'none',
+                                borderRadius: '12px',
+                                fontSize: '13px',
+                                fontWeight: 600,
+                                cursor: 'pointer',
+                                transition: 'all 0.2s',
+                                boxShadow: '0 4px 14px rgba(249,95,158,0.30)',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '8px'
+                              }}
+                            >
+                              <RotateCw size={14} />
+                              Restart Scan
+                            </button>
+                          </div>
+                        )}
+
                       </div>
                     </div>
                   )}
@@ -1597,7 +1704,7 @@ export default function DrivePage() {
                   </div>
 
                   {/* Empty state or list */}
-                  {displayFiles.length === 0 && scanStatus !== 'running' ? (
+                  {displayFiles.length === 0 && scanStatus !== 'running' && scanStatus !== 'failed' && scanStatus !== 'cancelled' ? (
                     <div style={{ textAlign: 'center', padding: '80px 20px', animation: 'fadeUp .25s ease both' }}>
                       <div style={{ fontSize: '52px', marginBottom: '16px', opacity: 0.45 }}>📂</div>
                       <p style={{ fontSize: '15px', fontWeight: 600, color: t.textPrimary, marginBottom: '6px' }}>
@@ -1621,7 +1728,7 @@ export default function DrivePage() {
                     </div>
                   ) : (
                     <div className="file-grid">
-                      {displayFiles.map(file => (
+                      {displayFiles.slice(0, visibleCount).map(file => (
                         <FileCard
                           key={file.id}
                           file={file}
