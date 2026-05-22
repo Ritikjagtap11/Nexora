@@ -166,11 +166,11 @@ CLOUDINARY_API_SECRET=xxxxxxxxxxxxxx
 
 Deploy the entire stack instantly on Render by using the root-level [render.yaml](file:///c:/LAPO-R/BE-Project's/Nexora/render.yaml) blueprint config.
 
-### 💾 Persistent Storage Requirements
-> [!IMPORTANT]
-> Because Nexora uses local FAISS indexes inside `backend/vectorstore`, a **Persistent Disk** is required on Render. Without it, your indexed document databases will be lost every time the backend container restarts or builds. 
+### 💾 Fully Stateless Architecture (100% Free Tier Compatible)
+> [!NOTE]
+> Nexora is engineered as a fully stateless application, which makes it 100% compatible with Render's **Free Tier** out of the box without requiring any paid Persistent Disks.
 > 
-> The [render.yaml](file:///c:/LAPO-R/BE-Project's/Nexora/render.yaml) file automatically provisions a **1GB High-Performance Volume** mounted directly at `/opt/render/project/src/backend/vectorstore` to guarantee complete index persistence.
+> Chunks and embeddings are stored directly in Firestore under `users/{uid}/chunks/{chunkId}`, and document metadata is stored in `users/{uid}/documents/{docId}`. Chat queries dynamically build a temporary, thread-safe, in-memory FAISS flat index on-the-fly for vector similarity searches, offering lightning-fast responses with zero local disk footprint.
 
 ### Step-by-Step Deploy Instructions
 1. Push your Nexora project repository to **GitHub**.
@@ -208,7 +208,7 @@ User enters Workspace
 ## 🛠️ Troubleshooting
 
 - **OAuth Callback failing in production?** Check that the **Authorized Redirect URIs** in Google Cloud Credentials precisely match your dynamic `GOOGLE_REDIRECT_URI` environment variable, and that `FRONTEND_URL` is set to the frontend address.
-- **Vectors are missing after redeployment?** Ensure the `vectorstore-disk` is correctly mounted at `/opt/render/project/src/backend/vectorstore` in your Render Web Service.
+- **Are vectors re-fetched on container restart?** Because Nexora is fully stateless, chunks are streamed from Firestore on-demand to initialize the local memory cache, so your index is never lost across server restarts or container builds.
 - **Cloudinary uploads failing?** Double check that your Cloudinary credentials do not contain extra whitespace in your environmental variables.
 
 ---

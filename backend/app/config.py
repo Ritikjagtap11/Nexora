@@ -46,4 +46,3 @@ settings = Settings()
 
 # Create directories if they don't exist
 Path(settings.UPLOAD_DIR).mkdir(exist_ok=True)
-Path(settings.VECTORSTORE_DIR).mkdir(exist_ok=True)

@@ -44,12 +44,7 @@ services:
       - key: VECTORSTORE_DIR
         value: vectorstore
 
-    # ── Persistent Storage Disk Mount (For Local FAISS Vectors) ───────────────
-    # Mounts a high-performance disk to prevent vector loss when container cycles.
-    disk:
-      name: vectorstore-disk
-      mountPath: backend/vectorstore
-      sizeGB: 1
+
 
   # ── React Static Frontend Client ────────────────────────────────────────────
   - type: web

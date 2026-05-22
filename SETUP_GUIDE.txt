@@ -21,8 +21,8 @@ Please download and install the following dependencies on your development machi
   Git               2.30 or higher     https://git-scm.com/downloads
 
   Hardware Requirements:
-    - RAM: 8GB minimum (16GB recommended due to PyTorch + FAISS processing loads)
-    - Disk Space: 5GB free space (for downloading virtual envs & ML models)
+    - RAM: 1GB minimum (2GB recommended. Highly optimized SentenceTransformer lazy-loading and dynamic in-memory index creation).
+    - Disk Space: 500MB free space (completely stateless design with zero persistent local disk footprint).
     - Internet: Active connection for external APIs (Gemini, Firebase, Cloudinary)
 
 ---
@@ -193,13 +193,12 @@ SECTION 6 — PRODUCTION DEPLOYMENT ON RENDER
 
 Nexora is fully optimized for Render and uses a single-click Blueprints architecture.
 
-1. High-Performance Persistent Disk Requirement
-───────────────────────────────────────────────
-> [!IMPORTANT]
-> The backend application builds and stores FAISS vector indices locally inside the `backend/vectorstore` folder. On Render, files stored on standard container disks are destroyed whenever your application restarts, cycles, or rebuilds.
+1. Fully Stateless Architecture (Render Free Plan Supported)
+─────────────────────────────────────────────────────────────
+> [!NOTE]
+> Nexora is engineered to be fully stateless and is completely compatible with Render's **Free Tier** out of the box without requiring a paid Persistent Disk.
 > 
-> To prevent loss of your indexed documents, you MUST mount a **Persistent Volume**.
-> The `render.yaml` file automatically requests a **1GB Persistent Disk** mounted at `/opt/render/project/src/backend/vectorstore`.
+> Document chunks and sentence embeddings are stored in Firestore under `users/{uid}/chunks/{chunkId}`, and document metadata is stored in `users/{uid}/documents/{docId}`. Chat queries dynamically pull chunks from Firestore on-demand to initialize the local memory cache and build a temporary, thread-safe, in-memory FAISS flat index on-the-fly, achieving lightning-fast responses with zero local disk footprint.
 
 2. Deployment Steps
 ───────────────────
@@ -245,7 +244,7 @@ Production Checklist
 - [ ] No hardcoded localhost URLs are present in code.
 - [ ] CORS origins in `main.py` include the production frontend domain.
 - [ ] Production callback URLs are registered in Google Cloud Console Credentials.
-- [ ] A 1GB persistent disk volume is mounted at `/opt/render/project/src/backend/vectorstore`.
+- [ ] Fully stateless operations are configured using Firestore chunks collection and dynamic in-memory FAISS flat indexes. No persistent disk is needed.
 - [ ] Rotator is configured with at least one active Google Gemini API key.
 - [ ] Firestore collections have security rules active.
 - [ ] Cloudinary accounts have valid, whitespace-free API keys.

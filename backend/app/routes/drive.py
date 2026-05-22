@@ -368,16 +368,22 @@ def index_single_user_file_helper(service, db, drive_file_id: str, filename: str
     """
     # ── 1. Check if already indexed ───────────────────────────────────────────
     existing = (
-        db.collection("drive_indexed_files")
+        db.collection("users")
+        .document(uid)
+        .collection("documents")
         .where("drive_file_id", "==", drive_file_id)
-        .where("user_id", "==", uid)
         .limit(1)
         .stream()
     )
     for doc in existing:
         logger.info(f"[DRIVE INDEX] Helper already indexed: {drive_file_id}")
         data = doc.to_dict()
-        return {"success": True, "already_indexed": True, "doc_id": data.get("doc_id"), "chunks": data.get("chunk_count", 0)}
+        return {
+            "success": True, 
+            "already_indexed": True, 
+            "doc_id": data.get("doc_id") or data.get("id"), 
+            "chunks": data.get("chunks", 0) or data.get("chunk_count", 0)
+        }
 
     # ── 2. Download file bytes from Drive ────────────────────────────────────
     fh = io.BytesIO()
@@ -462,8 +468,9 @@ def index_single_user_file_helper(service, db, drive_file_id: str, filename: str
         # ── 7. Embed and add to FAISS ────────────────────────────────────────
         num_chunks = embedding_service.add_documents(chunks, metadata)
 
-        # ── 8. Record in Firestore drive_indexed_files ───────────────────────
+        # ── 8. Record in Firestore users/{uid}/documents/{docId} ──────────────
         db_record = {
+            "id": doc_id,
             "doc_id": doc_id,
             "drive_file_id": drive_file_id,
             "filename": filename,
@@ -471,14 +478,18 @@ def index_single_user_file_helper(service, db, drive_file_id: str, filename: str
             "username": email,
             "summary": summary,
             "suggested_questions": questions[:3],
+            "chunks": num_chunks,
             "chunk_count": num_chunks,
-            "indexed_at": datetime.utcnow(),
+            "indexed_at": datetime.utcnow().isoformat(),
+            "uploaded_at": datetime.utcnow().isoformat(),
+            "upload_date": metadata.get("upload_date"),
+            "file_size": len(file_bytes),
             "content_preview": content_preview,
             "page_count": page_count,
             "language": "English",
             "full_path": f"My Drive/{filename}",
         }
-        db.collection("drive_indexed_files").document(doc_id).set(db_record)
+        db.collection("users").document(uid).collection("documents").document(doc_id).set(db_record)
 
         logger.info(f"[DRIVE INDEX] Successfully indexed: {filename} (chunks={num_chunks})")
         return {"success": True, "doc_id": doc_id, "chunks": num_chunks}
@@ -797,9 +808,10 @@ async def get_index_status(
 
     db = get_firestore()
     docs = (
-        db.collection("drive_indexed_files")
+        db.collection("users")
+        .document(current_user["id"])
+        .collection("documents")
         .where("drive_file_id", "==", file_id)
-        .where("user_id", "==", current_user["id"])
         .limit(1)
         .stream()
     )
@@ -807,10 +819,10 @@ async def get_index_status(
         data = doc.to_dict()
         return {
             "indexed": True,
-            "doc_id": data.get("doc_id"),
-            "chunk_count": data.get("chunk_count", 0),
+            "doc_id": data.get("doc_id") or data.get("id"),
+            "chunk_count": data.get("chunks", 0) or data.get("chunk_count", 0),
             "filename": data.get("filename"),
-            "indexed_at": str(data.get("indexed_at", "")),
+            "indexed_at": str(data.get("indexed_at", "") or data.get("uploaded_at", "")),
         }
 
     return {"indexed": False, "chunk_count": 0}
@@ -825,16 +837,17 @@ async def get_file_preview(
     """Returns AI-generated index summary, key terms, language, and preview from Firestore."""
     db = get_firestore()
     docs = (
-        db.collection("drive_indexed_files")
+        db.collection("users")
+        .document(current_user["id"])
+        .collection("documents")
         .where("drive_file_id", "==", file_id)
-        .where("user_id", "==", current_user["id"])
         .limit(1)
         .stream()
     )
     for doc in docs:
         data = doc.to_dict()
         return {
-            "doc_id": data.get("doc_id"),
+            "doc_id": data.get("doc_id") or data.get("id"),
             "drive_file_id": data.get("drive_file_id"),
             "filename": data.get("filename"),
             "summary": data.get("summary", "This document has been indexed and is fully searchable."),

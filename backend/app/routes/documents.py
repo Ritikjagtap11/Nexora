@@ -134,7 +134,7 @@ async def upload_document(
 
         num_chunks = embedding_service.add_documents(filtered_chunks, metadata)
 
-        db.collection("documents").document(doc_id).set({
+        db.collection("users").document(current_user["id"]).collection("documents").document(doc_id).set({
             "id": doc_id,
             "filename": file.filename,
             "user_id": current_user["id"],
@@ -143,7 +143,10 @@ async def upload_document(
             "username": email,
             "summary": metadata.get('summary'),
             "suggested_questions": metadata.get('suggested_questions', []),
-            "uploaded_at": datetime.utcnow()
+            "uploaded_at": datetime.utcnow().isoformat(),
+            "upload_date": metadata.get('upload_date'),
+            "file_size": file_size,
+            "chunks": num_chunks
         })
 
         if os.path.exists(file_path):
@@ -177,21 +180,17 @@ async def list_documents(current_user: dict = Depends(get_current_user)):
         result = []
 
         for doc in vs_docs:
-            doc_id = doc.get('id')
-            meta = next((m for m in getattr(embedding_service, 'metadata_store', []) if m.get('id') == doc_id), {})
-            chunk_count = sum(1 for m in getattr(embedding_service, 'metadata_store', []) if m.get('id') == doc_id)
-
             result.append(Document(
-                id=doc_id,
+                id=doc.get('id'),
                 filename=doc.get('filename'),
-                upload_date=doc.get('upload_date', meta.get('upload_date')),
-                chunks=chunk_count,
-                file_size=meta.get('file_size', 0),
+                upload_date=doc.get('upload_date') or datetime.utcnow().isoformat(),
+                chunks=doc.get('chunks', 0),
+                file_size=doc.get('file_size', 0),
                 summary=doc.get('summary'),
-                suggested_questions=_clean_suggested_questions(doc.get('suggested_questions') or meta.get('suggested_questions')),
-                drive_file_id=doc.get('drive_file_id') or meta.get('drive_file_id'),
-                cloudinary_url=meta.get('cloudinary_url'),
-                cloudinary_public_id=meta.get('cloudinary_public_id'),
+                suggested_questions=_clean_suggested_questions(doc.get('suggested_questions')),
+                drive_file_id=doc.get('drive_file_id'),
+                cloudinary_url=doc.get('cloudinary_url'),
+                cloudinary_public_id=doc.get('cloudinary_public_id'),
             ))
 
         # STRICT: Only list from this user's email folder
@@ -227,26 +226,28 @@ async def list_documents(current_user: dict = Depends(get_current_user)):
 @router.delete("/{doc_id}")
 async def delete_document(doc_id: str, current_user: dict = Depends(get_current_user)):
     try:
+        db = get_firestore()
+        # Find document in users/{uid}/documents/{doc_id} to get Cloudinary public ID
+        doc_ref = db.collection("users").document(current_user["id"]).collection("documents").document(doc_id)
+        doc_snap = doc_ref.get()
+        if doc_snap.exists:
+            pid = doc_snap.to_dict().get("cloudinary_public_id")
+            if pid:
+                try:
+                    cloudinary_delete_file(pid)
+                except Exception as e:
+                    print(f"[CLOUDINARY DELETE ERROR] {e}")
+
+        # Delete document metadata & chunks from Firestore and cache
         embedding_service.delete_document(doc_id, current_user["id"])
 
-        try:
-            db = get_firestore()
-            doc = db.collection("documents").document(doc_id).get()
-            if doc.exists:
-                pid = doc.to_dict().get("cloudinary_public_id")
-                if pid:
-                    cloudinary_delete_file(pid)
-        except:
-            pass
-
-        try:
-            db.collection("documents").document(doc_id).delete()
-        except:
-            pass
-
+        # Also clean up any lingering files in UPLOAD_DIR
         for f in os.listdir(settings.UPLOAD_DIR):
             if f.startswith(doc_id):
-                os.remove(os.path.join(settings.UPLOAD_DIR, f))
+                try:
+                    os.remove(os.path.join(settings.UPLOAD_DIR, f))
+                except Exception:
+                    pass
 
         return {"message": "Deleted successfully"}
     except Exception as e:
