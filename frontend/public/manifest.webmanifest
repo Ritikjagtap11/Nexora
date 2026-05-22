@@ -1,0 +1,21 @@
+{
+  "name": "NEXORA AI Document System",
+  "short_name": "NEXORA",
+  "description": "Intelligent Document Retrieval System Using LLM",
+  "theme_color": "#F95F9E",
+  "background_color": "#ffffff",
+  "display": "standalone",
+  "start_url": "/",
+  "icons": [
+    {
+      "src": "/logo.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/logo.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

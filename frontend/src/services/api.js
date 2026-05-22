@@ -8,7 +8,7 @@ const getValidToken = async () => {
     const auth = getAuth();
     const user = auth.currentUser;
     if (user) {
-      const token = await user.getIdToken(true);
+      const token = await user.getIdToken();
       localStorage.setItem('nexora_token', token);
       return token;
     }

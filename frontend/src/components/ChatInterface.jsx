@@ -215,6 +215,7 @@ export default function ChatInterface({ sendMessageRef, loadedSession, onNewChat
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
   const sessionIdRef = useRef(null);
+  const responseAccumulatorRef = useRef('');
 
   const { selectedDocs, saveSession, startNewSession, currentSessionId } = useChatContext();
   const dialog = useDialog();
@@ -331,6 +332,7 @@ export default function ChatInterface({ sendMessageRef, loadedSession, onNewChat
 
     const withPlaceholder = [...nextMessages, { role: 'assistant', content: '', provider: null, streaming: true, afterSuggestions: [] }];
     setMessages(withPlaceholder);
+    responseAccumulatorRef.current = '';
 
     try {
       await chatAPI.sendMessage(
@@ -339,11 +341,13 @@ export default function ChatInterface({ sendMessageRef, loadedSession, onNewChat
         selectedDocs.length > 0 ? selectedDocs : null,
 
         (chunk) => {
+          responseAccumulatorRef.current += chunk;
+          const currentText = responseAccumulatorRef.current;
           setMessages(prev => {
             const updated = [...prev];
             const last = updated[updated.length - 1];
             if (last?.role === 'assistant') {
-              updated[updated.length - 1] = { ...last, content: last.content + chunk, streaming: true };
+              updated[updated.length - 1] = { ...last, content: currentText, streaming: true };
             }
             return updated;
           });
